@@ -28,6 +28,7 @@ fn bench_encode(c: &mut Criterion) {
     // FromStr — varying sizes
     let small = "42";
     let medium = "123.456789";
+    let dynamodb = make_large_decimal(38); // DynamoDB number precision limit
     let large = make_large_decimal(100);
     let very_large = make_large_decimal(1000);
 
@@ -36,6 +37,9 @@ fn bench_encode(c: &mut Criterion) {
     });
     g.bench_function("from_str/medium", |b| {
         b.iter(|| black_box(medium).parse::<Decimal>().unwrap());
+    });
+    g.bench_function("from_str/dynamodb_38d", |b| {
+        b.iter(|| black_box(dynamodb.as_str()).parse::<Decimal>().unwrap());
     });
     g.bench_function("from_str/large_100d", |b| {
         b.iter(|| black_box(large.as_str()).parse::<Decimal>().unwrap());
@@ -74,6 +78,7 @@ fn bench_decode(c: &mut Criterion) {
 
     let small: Decimal = "42".parse().unwrap();
     let medium: Decimal = "123.456789".parse().unwrap();
+    let dynamodb: Decimal = make_large_decimal(38).parse().unwrap();
     let large: Decimal = make_large_decimal(100).parse().unwrap();
     let very_large: Decimal = make_large_decimal(1000).parse().unwrap();
 
@@ -83,6 +88,9 @@ fn bench_decode(c: &mut Criterion) {
     });
     g.bench_function("decode/medium", |b| {
         b.iter(|| black_box(&medium).decode());
+    });
+    g.bench_function("decode/dynamodb_38d", |b| {
+        b.iter(|| black_box(&dynamodb).decode());
     });
     g.bench_function("decode/large_100d", |b| {
         b.iter(|| black_box(&large).decode());
@@ -98,6 +106,13 @@ fn bench_decode(c: &mut Criterion) {
     g.bench_with_input(BenchmarkId::new("display", "medium"), &medium, |b, d| {
         b.iter(|| format!("{}", black_box(d)));
     });
+    g.bench_with_input(
+        BenchmarkId::new("display", "dynamodb_38d"),
+        &dynamodb,
+        |b, d| {
+            b.iter(|| format!("{}", black_box(d)));
+        },
+    );
     g.bench_with_input(BenchmarkId::new("display", "large_100d"), &large, |b, d| {
         b.iter(|| format!("{}", black_box(d)));
     });
@@ -150,7 +165,12 @@ fn bench_compare(c: &mut Criterion) {
 fn bench_roundtrip(c: &mut Criterion) {
     let mut g = c.benchmark_group("roundtrip");
 
-    let inputs = [("small", "42"), ("medium", "123.456789")];
+    let dynamodb_rt = make_large_decimal(38);
+    let inputs = [
+        ("small", "42"),
+        ("medium", "123.456789"),
+        ("dynamodb_38d", dynamodb_rt.as_str()),
+    ];
 
     for (name, input) in &inputs {
         // String -> Decimal -> Display -> String

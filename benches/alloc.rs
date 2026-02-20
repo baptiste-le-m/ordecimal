@@ -107,6 +107,14 @@ fn main() {
         bytes,
     });
 
+    let dynamodb_str = make_large_decimal(38);
+    let (_, allocs, bytes) = measure(|| dynamodb_str.as_str().parse::<Decimal>().unwrap());
+    rows.push(Row {
+        name: "FromStr DynamoDB (38 digits)",
+        allocs,
+        bytes,
+    });
+
     let large_str = make_large_decimal(100);
     let (_, allocs, bytes) = measure(|| large_str.as_str().parse::<Decimal>().unwrap());
     rows.push(Row {
@@ -165,6 +173,14 @@ fn main() {
     let (_, allocs, bytes) = measure(|| medium.decode());
     rows.push(Row {
         name: "decode() medium",
+        allocs,
+        bytes,
+    });
+
+    let dynamodb: Decimal = dynamodb_str.parse().unwrap();
+    let (_, allocs, bytes) = measure(|| dynamodb.decode());
+    rows.push(Row {
+        name: "decode() DynamoDB (38 digits)",
         allocs,
         bytes,
     });

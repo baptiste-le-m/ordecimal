@@ -156,6 +156,7 @@ impl Decimal {
     }
 
     /// Parse a decimal from string and encode immediately (internal helper)
+    #[allow(clippy::too_many_lines)]
     fn parse_and_encode(s: &str) -> EncodeResult<Self> {
         let s = s.trim();
 
@@ -268,23 +269,31 @@ impl Decimal {
             ((frac_leading_zeros + 1) as u64, false)
         };
 
-        // Build significand digits directly into Vec<u8> — single allocation,
-        // iterating over the two slices without concatenating them first
-        let mut significand = Vec::with_capacity(significant_len);
-        for b in integer_part
+        // Encode significand using a stack buffer when possible (covers all
+        // DynamoDB numbers ≤ 38 digits), falling back to a Vec for very large
+        // arbitrary-precision values.
+        let sig_iter = integer_part
             .bytes()
             .chain(fractional_part.bytes())
             .skip(leading_zeros)
-        {
-            significand.push(b - b'0');
-        }
-        // Trim trailing zeros
-        while significand.last() == Some(&0) && significand.len() > 1 {
-            significand.pop();
-        }
+            .take(significant_len)
+            .map(|b| b - b'0');
 
-        // Encode immediately
-        let bytes = encode_from_parts(positive, exponent_positive, exponent, &significand);
+        let bytes = if significant_len <= 64 {
+            let mut buf = [0u8; 64];
+            for (i, d) in sig_iter.enumerate() {
+                buf[i] = d;
+            }
+            encode_from_parts(
+                positive,
+                exponent_positive,
+                exponent,
+                &buf[..significant_len],
+            )
+        } else {
+            let significand: Vec<u8> = sig_iter.collect();
+            encode_from_parts(positive, exponent_positive, exponent, &significand)
+        };
 
         Ok(Self { bytes })
     }

@@ -4,6 +4,7 @@ use crate::error::{DecodeError, EncodeError, EncodeResult};
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 /// Special decimal values
@@ -192,8 +193,31 @@ impl Decimal {
             ));
         }
 
+        // Handle scientific notation: split on 'e' or 'E'
+        // e.g. "1.5e10" → coefficient "1.5", sci_exp = +10
+        //      "3E-4"   → coefficient "3",   sci_exp = -4
+        let (coeff_str, sci_exp): (&str, i64) =
+            if let Some(e_pos) = s.bytes().position(|b| b == b'e' || b == b'E') {
+                let coeff = &s[..e_pos];
+                let exp_str = &s[e_pos + 1..];
+                if exp_str.is_empty() || coeff.is_empty() {
+                    return Err(EncodeError::InvalidFormat(
+                        "invalid scientific notation".to_string(),
+                    ));
+                }
+                let exp: i64 = exp_str.parse().map_err(|_| {
+                    EncodeError::InvalidFormat(format!("invalid exponent: {exp_str}"))
+                })?;
+                (coeff, exp)
+            } else {
+                (s, 0)
+            };
+
         // Handle zero
-        if s == "0" || s == "0.0" || s.bytes().all(|b| b == b'0' || b == b'.') {
+        if coeff_str == "0"
+            || coeff_str == "0.0"
+            || coeff_str.bytes().all(|b| b == b'0' || b == b'.')
+        {
             return if positive {
                 Ok(Self::zero())
             } else {
@@ -203,10 +227,10 @@ impl Decimal {
             };
         }
 
-        // Parse the number - split without allocation
-        let (integer_part, fractional_part) = match s.find('.') {
+        // Parse the coefficient - split without allocation
+        let (integer_part, fractional_part) = match coeff_str.find('.') {
             Some(pos) => {
-                let (int, rest) = s.split_at(pos);
+                let (int, rest) = coeff_str.split_at(pos);
                 if rest[1..].contains('.') {
                     return Err(EncodeError::InvalidFormat(
                         "multiple decimal points".to_string(),
@@ -214,7 +238,7 @@ impl Decimal {
                 }
                 (int, &rest[1..])
             }
-            None => (s, ""),
+            None => (coeff_str, ""),
         };
 
         // Validate all characters are digits (no intermediate String allocation)
@@ -254,19 +278,30 @@ impl Decimal {
             };
         }
 
-        // Calculate exponent from the position of the decimal point relative to
-        // the first significant digit
+        // Calculate the raw exponent from the position of the decimal point
+        // relative to the first significant digit, then adjust by sci_exp.
         let decimal_point_position = integer_part.trim_start_matches('0').len();
 
-        #[allow(clippy::cast_possible_truncation)]
-        let (exponent, exponent_positive) = if decimal_point_position > 0 {
-            // Number >= 1: exponent = number_of_integer_significant_digits - 1
-            ((decimal_point_position - 1) as u64, true)
+        // raw_exp is the exponent in scientific notation:
+        //   coefficient = d0.d1d2... × 10^raw_exp
+        // For integer part with significant digits: raw_exp = len(integer_significant) - 1
+        // For purely fractional (0.00x...): raw_exp = -(leading_zeros_in_frac + 1)
+        let raw_exp: i64 = if decimal_point_position > 0 {
+            (decimal_point_position as i64) - 1
         } else {
-            // Number < 1 (0.xxx): exponent = leading_zeros_in_fractional + 1
             let frac_leading_zeros =
                 fractional_part.len() - fractional_part.trim_start_matches('0').len();
-            ((frac_leading_zeros + 1) as u64, false)
+            -((frac_leading_zeros as i64) + 1)
+        };
+
+        // Apply the scientific notation exponent offset
+        let final_exp = raw_exp + sci_exp;
+
+        #[allow(clippy::cast_sign_loss)]
+        let (exponent, exponent_positive) = if final_exp >= 0 {
+            (final_exp as u64, true)
+        } else {
+            (final_exp.unsigned_abs(), false)
         };
 
         // Encode significand using a stack buffer when possible (covers all
@@ -443,6 +478,25 @@ impl Ord for Decimal {
         }
         // Direct byte comparison for order preservation
         self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl Hash for Decimal {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Must be consistent with PartialEq: +0 == -0, so both must hash
+        // to the same value. We normalize by always hashing the +0 bytes.
+        if self.is_zero() {
+            [encode_special_byte(SpecialValue::PositiveZero)].hash(state);
+        } else {
+            self.bytes.hash(state);
+        }
+    }
+}
+
+impl Default for Decimal {
+    /// Returns positive zero.
+    fn default() -> Self {
+        Self::zero()
     }
 }
 
@@ -938,5 +992,191 @@ mod tests {
         let from_f32 = Decimal::from(v);
         let from_f64 = Decimal::from(f64::from(v));
         assert_eq!(from_f32.as_bytes(), from_f64.as_bytes());
+    }
+
+    // =========================================================================
+    // Hash tests
+    // =========================================================================
+
+    #[test]
+    fn test_hash_equal_values() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let a: Decimal = "42".parse().unwrap();
+        let b: Decimal = "42".parse().unwrap();
+
+        let hash_a = {
+            let mut h = DefaultHasher::new();
+            a.hash(&mut h);
+            h.finish()
+        };
+        let hash_b = {
+            let mut h = DefaultHasher::new();
+            b.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn test_hash_zero_normalization() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let pos_zero: Decimal = "0".parse().unwrap();
+        let neg_zero: Decimal = "-0".parse().unwrap();
+        assert_eq!(pos_zero, neg_zero, "precondition: +0 == -0");
+
+        let hash_pos = {
+            let mut h = DefaultHasher::new();
+            pos_zero.hash(&mut h);
+            h.finish()
+        };
+        let hash_neg = {
+            let mut h = DefaultHasher::new();
+            neg_zero.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash_pos, hash_neg, "+0 and -0 must hash equally");
+    }
+
+    #[test]
+    fn test_hash_in_hashset() {
+        use std::collections::HashSet;
+
+        let mut set = HashSet::new();
+        set.insert("42".parse::<Decimal>().unwrap());
+        set.insert("42".parse::<Decimal>().unwrap()); // duplicate
+        set.insert("-7".parse::<Decimal>().unwrap());
+        set.insert("0".parse::<Decimal>().unwrap());
+        set.insert("-0".parse::<Decimal>().unwrap()); // duplicate of 0
+
+        assert_eq!(set.len(), 3, "HashSet should deduplicate equal values");
+    }
+
+    // =========================================================================
+    // Default tests
+    // =========================================================================
+
+    #[test]
+    fn test_default_is_zero() {
+        let d = Decimal::default();
+        assert!(d.is_zero());
+        assert_eq!(d, Decimal::zero());
+    }
+
+    // =========================================================================
+    // Scientific notation tests
+    // =========================================================================
+
+    #[test]
+    fn test_scientific_notation_basic() {
+        // 1e10 = 10000000000
+        let a: Decimal = "1e10".parse().unwrap();
+        let b: Decimal = "10000000000".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_uppercase() {
+        let a: Decimal = "1E10".parse().unwrap();
+        let b: Decimal = "10000000000".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_with_decimal() {
+        // 1.5e3 = 1500
+        let a: Decimal = "1.5e3".parse().unwrap();
+        let b: Decimal = "1500".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_negative_exponent() {
+        // 1.5e-3 = 0.0015
+        let a: Decimal = "1.5e-3".parse().unwrap();
+        let b: Decimal = "0.0015".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_positive_exponent_sign() {
+        // 1.5e+3 = 1500
+        let a: Decimal = "1.5e+3".parse().unwrap();
+        let b: Decimal = "1500".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_negative_value() {
+        // -2.5e4 = -25000
+        let a: Decimal = "-2.5e4".parse().unwrap();
+        let b: Decimal = "-25000".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_zero_exponent() {
+        // 42e0 = 42
+        let a: Decimal = "42e0".parse().unwrap();
+        let b: Decimal = "42".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_zero_coefficient() {
+        let a: Decimal = "0e10".parse().unwrap();
+        assert!(a.is_zero());
+    }
+
+    #[test]
+    fn test_scientific_notation_small_to_large() {
+        // 3.14e-2 = 0.0314
+        let a: Decimal = "3.14e-2".parse().unwrap();
+        let b: Decimal = "0.0314".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_scientific_notation_order_preserved() {
+        let values: Vec<Decimal> = vec![
+            "-1e10".parse().unwrap(),
+            "-1e2".parse().unwrap(),
+            "1e-10".parse().unwrap(),
+            "1e0".parse().unwrap(),
+            "1e2".parse().unwrap(),
+            "1e10".parse().unwrap(),
+        ];
+        for i in 1..values.len() {
+            assert!(
+                values[i - 1] < values[i],
+                "order broken: {} should be < {}",
+                i - 1,
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_scientific_notation_invalid() {
+        // Empty exponent
+        assert!("1e".parse::<Decimal>().is_err());
+        // Empty coefficient
+        assert!("e10".parse::<Decimal>().is_err());
+        // Non-numeric exponent
+        assert!("1ex".parse::<Decimal>().is_err());
+    }
+
+    #[test]
+    fn test_scientific_notation_dynamodb_style() {
+        // DynamoDB sends numbers like "1E-130" (min positive) and "9.9999999999999999999999999999999999999E+125"
+        let min_pos: Decimal = "1E-130".parse().unwrap();
+        let max_pos: Decimal = "9.9999999999999999999999999999999999999E+125"
+            .parse()
+            .unwrap();
+        assert!(min_pos < max_pos);
+
+        // Verify min positive is greater than zero
+        assert!(Decimal::zero() < min_pos);
     }
 }

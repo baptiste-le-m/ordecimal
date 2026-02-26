@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use decimal_bytes::Decimal as DbDecimal;
+use memcomparable::Decimal as McDecimal;
 use ordecimal::Decimal;
 use std::str::FromStr;
 
@@ -134,6 +135,50 @@ fn bench_encode(c: &mut Criterion) {
         b.iter(|| DbDecimal::from_str("0").unwrap());
     });
 
+    // -- memcomparable --
+    // Note: memcomparable uses rust_decimal (~29 digits max) so large inputs are lossy.
+    // We still benchmark them to show what happens.
+
+    g.bench_function("memcomparable/from_str/small", |b| {
+        b.iter(|| {
+            McDecimal::from_str(black_box(small))
+                .unwrap()
+                .to_vec()
+                .unwrap()
+        });
+    });
+    g.bench_function("memcomparable/from_str/medium", |b| {
+        b.iter(|| {
+            McDecimal::from_str(black_box(medium))
+                .unwrap()
+                .to_vec()
+                .unwrap()
+        });
+    });
+    g.bench_function("memcomparable/from_str/dynamodb_38d_lossy", |b| {
+        b.iter(|| {
+            McDecimal::from_str(black_box(dynamodb.as_str()))
+                .unwrap()
+                .to_vec()
+                .unwrap()
+        });
+    });
+
+    g.bench_function("memcomparable/from_u64", |b| {
+        b.iter(|| {
+            McDecimal::Normalized(rust_decimal::Decimal::from(black_box(123_456_789_u64)))
+                .to_vec()
+                .unwrap()
+        });
+    });
+
+    g.bench_function("memcomparable/special/nan", |b| {
+        b.iter(|| McDecimal::NaN.to_vec().unwrap());
+    });
+    g.bench_function("memcomparable/special/zero", |b| {
+        b.iter(|| McDecimal::ZERO.to_vec().unwrap());
+    });
+
     g.finish();
 }
 
@@ -150,7 +195,7 @@ fn bench_decode(c: &mut Criterion) {
     let large: Decimal = make_large_decimal(100).parse().unwrap();
     let very_large: Decimal = make_large_decimal(1000).parse().unwrap();
 
-    // ordecimal: decode() — structured decode (no decimal-bytes equivalent)
+    // ordecimal: decode() — structured decode
     g.bench_function("ordecimal/decode/small", |b| {
         b.iter(|| black_box(&small).decode());
     });
@@ -165,6 +210,17 @@ fn bench_decode(c: &mut Criterion) {
     });
     g.bench_function("ordecimal/decode/very_large_1000d", |b| {
         b.iter(|| black_box(&very_large).decode());
+    });
+
+    // memcomparable: decode from bytes
+    let mc_small_bytes = McDecimal::from_str("42").unwrap().to_vec().unwrap();
+    let mc_medium_bytes = McDecimal::from_str("123.456789").unwrap().to_vec().unwrap();
+
+    g.bench_function("memcomparable/decode/small", |b| {
+        b.iter(|| McDecimal::from_slice(black_box(&mc_small_bytes)).unwrap());
+    });
+    g.bench_function("memcomparable/decode/medium", |b| {
+        b.iter(|| McDecimal::from_slice(black_box(&mc_medium_bytes)).unwrap());
     });
 
     // Display — ordecimal
@@ -247,6 +303,25 @@ fn bench_decode(c: &mut Criterion) {
         },
     );
 
+    // Display — memcomparable
+    let mc_small = McDecimal::from_str("42").unwrap();
+    let mc_medium = McDecimal::from_str("123.456789").unwrap();
+
+    g.bench_with_input(
+        BenchmarkId::new("memcomparable/display", "small"),
+        &mc_small,
+        |b, d| {
+            b.iter(|| format!("{}", black_box(d)));
+        },
+    );
+    g.bench_with_input(
+        BenchmarkId::new("memcomparable/display", "medium"),
+        &mc_medium,
+        |b, d| {
+            b.iter(|| format!("{}", black_box(d)));
+        },
+    );
+
     g.finish();
 }
 
@@ -289,6 +364,31 @@ fn bench_compare(c: &mut Criterion) {
     });
     g.bench_function("decimal_bytes/cmp/different_large", |bench| {
         bench.iter(|| black_box(&db_a_large).cmp(black_box(&db_b_large)));
+    });
+
+    // memcomparable — compare as encoded bytes (the real use case)
+    let mc_a_bytes = McDecimal::from_str("123.456789").unwrap().to_vec().unwrap();
+    let mc_b_bytes = McDecimal::from_str("987.654321").unwrap().to_vec().unwrap();
+
+    let mc_a_bytes_clone = mc_a_bytes.clone();
+    g.bench_function("memcomparable/cmp_bytes/equal", |bench| {
+        bench.iter(|| black_box(&mc_a_bytes).cmp(black_box(&mc_a_bytes_clone)));
+    });
+    g.bench_function("memcomparable/cmp_bytes/different_medium", |bench| {
+        bench.iter(|| black_box(&mc_a_bytes).cmp(black_box(&mc_b_bytes)));
+    });
+
+    // memcomparable — compare as Decimal enum (derive Ord on rust_decimal)
+    let mc_a = McDecimal::from_str("123.456789").unwrap();
+    let mc_b = McDecimal::from_str("987.654321").unwrap();
+
+    let mc_a_clone = mc_a;
+    let mc_a2 = McDecimal::from_str("123.456789").unwrap();
+    g.bench_function("memcomparable/cmp_enum/equal", |bench| {
+        bench.iter(|| black_box(&mc_a2).cmp(black_box(&mc_a_clone)));
+    });
+    g.bench_function("memcomparable/cmp_enum/different_medium", |bench| {
+        bench.iter(|| black_box(&mc_a2).cmp(black_box(&mc_b)));
     });
 
     g.finish();
@@ -341,6 +441,25 @@ fn bench_roundtrip(c: &mut Criterion) {
                 b.iter(|| {
                     let d = DbDecimal::from_str(black_box(s)).unwrap();
                     format!("{d}")
+                });
+            },
+        );
+    }
+
+    // memcomparable roundtrip: String -> McDecimal -> bytes -> McDecimal -> Display
+    // Only for inputs that rust_decimal can handle without precision loss
+    let mc_inputs = [("small", "42"), ("medium", "123.456789")];
+
+    for (name, input) in &mc_inputs {
+        g.bench_with_input(
+            BenchmarkId::new("memcomparable/str_encode_decode_display", name),
+            input,
+            |b, &s| {
+                b.iter(|| {
+                    let d = McDecimal::from_str(black_box(s)).unwrap();
+                    let encoded = d.to_vec().unwrap();
+                    let decoded = McDecimal::from_slice(&encoded).unwrap();
+                    format!("{decoded}")
                 });
             },
         );

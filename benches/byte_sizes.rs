@@ -1,4 +1,4 @@
-//! Encoded byte-size comparison: ordecimal vs decimal-bytes.
+//! Encoded byte-size comparison: ordecimal vs decimal-bytes vs memcomparable.
 //!
 //! Prints a table showing how many bytes each library produces for the same
 //! input values. Run with:
@@ -8,6 +8,7 @@
 //! ```
 
 use decimal_bytes::Decimal as DbDecimal;
+use memcomparable::Decimal as McDecimal;
 use ordecimal::Decimal;
 use std::str::FromStr;
 
@@ -30,6 +31,7 @@ struct Row {
     input: String,
     ordecimal_bytes: usize,
     decimal_bytes_bytes: usize,
+    memcomparable_result: McResult,
 }
 
 fn print_table(rows: &[Row]) {
@@ -41,15 +43,15 @@ fn print_table(rows: &[Row]) {
         .max(20);
 
     println!(
-        "{:<width$}  {:>15}  {:>15}  {:>10}",
+        "{:<width$}  {:>12}  {:>14}  {:>14}",
         "input",
         "ordecimal",
         "decimal-bytes",
-        "delta",
+        "memcomparable",
         width = max_input
     );
     println!(
-        "{:-<width$}  {:->15}  {:->15}  {:->10}",
+        "{:-<width$}  {:->12}  {:->14}  {:->14}",
         "",
         "",
         "",
@@ -57,21 +59,56 @@ fn print_table(rows: &[Row]) {
         width = max_input
     );
     for row in rows {
-        let delta = row.ordecimal_bytes as isize - row.decimal_bytes_bytes as isize;
-        let delta_str = if delta == 0 {
-            "=".to_string()
-        } else {
-            format!("{:+}", delta)
+        let mc_str = match &row.memcomparable_result {
+            McResult::Ok(n) => format!("{} B", n),
+            McResult::ParseError => "parse err".to_string(),
+            McResult::Lossy(n) => format!("{} B *LOSSY*", n),
         };
         println!(
-            "{:<width$}  {:>12} B   {:>12} B   {:>10}",
+            "{:<width$}  {:>9} B   {:>11} B   {:>14}",
             row.input,
             row.ordecimal_bytes,
             row.decimal_bytes_bytes,
-            delta_str,
+            mc_str,
             width = max_input
         );
     }
+}
+
+enum McResult {
+    Ok(usize),
+    /// Parse failed (e.g. scientific notation not supported by rust_decimal)
+    ParseError,
+    /// Parsed but silently lost precision (rust_decimal max ~29 digits)
+    Lossy(usize),
+}
+
+/// Try to encode a string value with memcomparable, detecting precision loss.
+fn mc_byte_size(input: &str) -> McResult {
+    let d: McDecimal = match input.parse() {
+        Ok(d) => d,
+        Err(_) => return McResult::ParseError,
+    };
+    let encoded = match d.to_vec() {
+        Ok(v) => v,
+        Err(_) => return McResult::ParseError,
+    };
+
+    // Detect precision loss: decode back and check if the round-trip is lossy.
+    // rust_decimal silently truncates to ~29 significant digits.
+    if let McDecimal::Normalized(rd) = d {
+        let displayed = rd.to_string();
+        // Strip signs and leading zeros for comparison
+        let orig_digits: String = input.chars().filter(|c| c.is_ascii_digit()).collect();
+        let rt_digits: String = displayed.chars().filter(|c| c.is_ascii_digit()).collect();
+        let orig_trimmed = orig_digits.trim_start_matches('0').trim_end_matches('0');
+        let rt_trimmed = rt_digits.trim_start_matches('0').trim_end_matches('0');
+        if orig_trimmed.len() > rt_trimmed.len() + 1 {
+            return McResult::Lossy(encoded.len());
+        }
+    }
+
+    McResult::Ok(encoded.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -81,14 +118,16 @@ fn print_table(rows: &[Row]) {
 fn main() {
     let mut rows = Vec::new();
 
-    // Helper: measure both libraries for a string input
+    // Helper: measure all three libraries for a string input
     let mut add_str = |label: &str, input: &str| {
         let ord = input.parse::<Decimal>().unwrap();
         let db = DbDecimal::from_str(input).unwrap();
+        let mc = mc_byte_size(input);
         rows.push(Row {
             input: label.to_string(),
             ordecimal_bytes: ord.as_bytes().len(),
             decimal_bytes_bytes: db.as_bytes().len(),
+            memcomparable_result: mc,
         });
     };
 
@@ -132,27 +171,31 @@ fn main() {
         input: "zero".to_string(),
         ordecimal_bytes: Decimal::zero().as_bytes().len(),
         decimal_bytes_bytes: DbDecimal::from_str("0").unwrap().as_bytes().len(),
+        memcomparable_result: McResult::Ok(McDecimal::ZERO.to_vec().unwrap().len()),
     });
     rows.push(Row {
         input: "+infinity".to_string(),
         ordecimal_bytes: Decimal::infinity().as_bytes().len(),
         decimal_bytes_bytes: DbDecimal::infinity().as_bytes().len(),
+        memcomparable_result: McResult::Ok(McDecimal::Inf.to_vec().unwrap().len()),
     });
     rows.push(Row {
         input: "-infinity".to_string(),
         ordecimal_bytes: Decimal::neg_infinity().as_bytes().len(),
         decimal_bytes_bytes: DbDecimal::neg_infinity().as_bytes().len(),
+        memcomparable_result: McResult::Ok(McDecimal::NegInf.to_vec().unwrap().len()),
     });
     rows.push(Row {
         input: "NaN".to_string(),
         ordecimal_bytes: Decimal::nan().as_bytes().len(),
         decimal_bytes_bytes: DbDecimal::nan().as_bytes().len(),
+        memcomparable_result: McResult::Ok(McDecimal::NaN.to_vec().unwrap().len()),
     });
 
     // Print
     println!();
-    println!("Encoded byte size comparison: ordecimal vs decimal-bytes");
-    println!("=========================================================");
+    println!("Encoded byte size comparison: ordecimal vs decimal-bytes vs memcomparable");
+    println!("=========================================================================");
     println!();
     print_table(&rows);
     println!();

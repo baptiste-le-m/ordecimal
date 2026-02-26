@@ -1,4 +1,4 @@
-//! Allocation-counting benchmarks for ordecimal vs decimal-bytes.
+//! Allocation-counting benchmarks for ordecimal vs decimal-bytes vs memcomparable.
 //!
 //! Measures the number of heap allocations and total bytes allocated for each
 //! operation. Run with:
@@ -11,6 +11,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use decimal_bytes::Decimal as DbDecimal;
+use memcomparable::Decimal as McDecimal;
 use ordecimal::Decimal;
 use std::str::FromStr;
 
@@ -117,6 +118,13 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) = measure(|| McDecimal::from_str("42").unwrap().to_vec().unwrap());
+    rows.push(Row {
+        name: "FromStr small (\"42\")",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
     // FromStr medium
     let (_, allocs, bytes) = measure(|| "123.456789".parse::<Decimal>().unwrap());
@@ -133,8 +141,16 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) =
+        measure(|| McDecimal::from_str("123.456789").unwrap().to_vec().unwrap());
+    rows.push(Row {
+        name: "FromStr medium (\"123.456789\")",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
-    // FromStr DynamoDB (38 digits)
+    // FromStr DynamoDB (38 digits) — memcomparable is lossy here
     let dynamodb_str = make_large_decimal(38);
     let (_, allocs, bytes) = measure(|| dynamodb_str.as_str().parse::<Decimal>().unwrap());
     rows.push(Row {
@@ -150,8 +166,20 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) = measure(|| {
+        McDecimal::from_str(dynamodb_str.as_str())
+            .unwrap()
+            .to_vec()
+            .unwrap()
+    });
+    rows.push(Row {
+        name: "FromStr DynamoDB (38d) *LOSSY*",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
-    // FromStr large (100 digits)
+    // FromStr large (100 digits) — memcomparable is lossy
     let large_str = make_large_decimal(100);
     let (_, allocs, bytes) = measure(|| large_str.as_str().parse::<Decimal>().unwrap());
     rows.push(Row {
@@ -167,8 +195,20 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) = measure(|| {
+        McDecimal::from_str(large_str.as_str())
+            .unwrap()
+            .to_vec()
+            .unwrap()
+    });
+    rows.push(Row {
+        name: "FromStr large (100d) *LOSSY*",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
-    // FromStr very large (1000 digits)
+    // FromStr very large (1000 digits) — memcomparable is lossy
     let very_large_str = make_large_decimal(1000);
     let (_, allocs, bytes) = measure(|| very_large_str.as_str().parse::<Decimal>().unwrap());
     rows.push(Row {
@@ -181,6 +221,18 @@ fn main() {
     rows.push(Row {
         name: "FromStr very large (1000 digits)",
         lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+    let (_, allocs, bytes) = measure(|| {
+        McDecimal::from_str(very_large_str.as_str())
+            .unwrap()
+            .to_vec()
+            .unwrap()
+    });
+    rows.push(Row {
+        name: "FromStr very large (1000d) *LOSSY*",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -200,6 +252,17 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) = measure(|| {
+        McDecimal::Normalized(rust_decimal::Decimal::from(123_456_789_u64))
+            .to_vec()
+            .unwrap()
+    });
+    rows.push(Row {
+        name: "From<u64> (123456789)",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
     // From<f64>
     let (_, allocs, bytes) = measure(|| Decimal::from(123.456_789_f64));
@@ -213,6 +276,18 @@ fn main() {
     rows.push(Row {
         name: "TryFrom<f64> (123.456789)",
         lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+    let (_, allocs, bytes) = measure(|| {
+        use rust_decimal::prelude::FromPrimitive;
+        McDecimal::Normalized(rust_decimal::Decimal::from_f64(123.456_789_f64).unwrap())
+            .to_vec()
+            .unwrap()
+    });
+    rows.push(Row {
+        name: "From<f64> (123.456789)",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -232,6 +307,13 @@ fn main() {
         allocs,
         bytes,
     });
+    let (_, allocs, bytes) = measure(|| McDecimal::NaN.to_vec().unwrap());
+    rows.push(Row {
+        name: "nan()",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
     let (_, allocs, bytes) = measure(Decimal::zero);
     rows.push(Row {
@@ -247,50 +329,10 @@ fn main() {
         allocs,
         bytes,
     });
-
-    // Scientific notation
-    let (_, allocs, bytes) = measure(|| "1.5e3".parse::<Decimal>().unwrap());
+    let (_, allocs, bytes) = measure(|| McDecimal::ZERO.to_vec().unwrap());
     rows.push(Row {
-        name: "FromStr sci (\"1.5e3\")",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-    let (_, allocs, bytes) = measure(|| DbDecimal::from_str("1.5e3").unwrap());
-    rows.push(Row {
-        name: "FromStr sci (\"1.5e3\")",
-        lib: "decimal-bytes",
-        allocs,
-        bytes,
-    });
-
-    let (_, allocs, bytes) = measure(|| "1E-130".parse::<Decimal>().unwrap());
-    rows.push(Row {
-        name: "FromStr sci (\"1E-130\")",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-    let (_, allocs, bytes) = measure(|| DbDecimal::from_str("1E-130").unwrap());
-    rows.push(Row {
-        name: "FromStr sci (\"1E-130\")",
-        lib: "decimal-bytes",
-        allocs,
-        bytes,
-    });
-
-    let ddb_max = "9.9999999999999999999999999999999999999E+125";
-    let (_, allocs, bytes) = measure(|| ddb_max.parse::<Decimal>().unwrap());
-    rows.push(Row {
-        name: "FromStr sci (DynamoDB max)",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-    let (_, allocs, bytes) = measure(|| DbDecimal::from_str(ddb_max).unwrap());
-    rows.push(Row {
-        name: "FromStr sci (DynamoDB max)",
-        lib: "decimal-bytes",
+        name: "zero()",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -312,6 +354,25 @@ fn main() {
     rows.push(Row {
         name: "decode() medium",
         lib: "ordecimal",
+        allocs,
+        bytes,
+    });
+
+    // memcomparable decode
+    let mc_small_bytes = McDecimal::from_str("42").unwrap().to_vec().unwrap();
+    let (_, allocs, bytes) = measure(|| McDecimal::from_slice(&mc_small_bytes).unwrap());
+    rows.push(Row {
+        name: "decode() small",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
+
+    let mc_medium_bytes = McDecimal::from_str("123.456789").unwrap().to_vec().unwrap();
+    let (_, allocs, bytes) = measure(|| McDecimal::from_slice(&mc_medium_bytes).unwrap());
+    rows.push(Row {
+        name: "decode() medium",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -360,6 +421,14 @@ fn main() {
         allocs,
         bytes,
     });
+    let mc_small = McDecimal::from_str("42").unwrap();
+    let (_, allocs, bytes) = measure(|| format!("{mc_small}"));
+    rows.push(Row {
+        name: "Display small",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
 
     let (_, allocs, bytes) = measure(|| format!("{medium}"));
     rows.push(Row {
@@ -373,6 +442,14 @@ fn main() {
     rows.push(Row {
         name: "Display medium",
         lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+    let mc_medium = McDecimal::from_str("123.456789").unwrap();
+    let (_, allocs, bytes) = measure(|| format!("{mc_medium}"));
+    rows.push(Row {
+        name: "Display medium",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -415,6 +492,16 @@ fn main() {
         bytes,
     });
 
+    let mc_a = McDecimal::from_str("123.456789").unwrap();
+    let mc_b = McDecimal::from_str("987.654321").unwrap();
+    let (_, allocs, bytes) = measure(|| mc_a.cmp(&mc_b));
+    rows.push(Row {
+        name: "cmp (different)",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
+
     let a_clone = a.clone();
     let (_, allocs, bytes) = measure(|| a.cmp(&a_clone));
     rows.push(Row {
@@ -429,6 +516,16 @@ fn main() {
     rows.push(Row {
         name: "cmp (equal)",
         lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+
+    let mc_a_clone = mc_a;
+    let mc_a2 = McDecimal::from_str("123.456789").unwrap();
+    let (_, allocs, bytes) = measure(|| mc_a2.cmp(&mc_a_clone));
+    rows.push(Row {
+        name: "cmp (equal)",
+        lib: "memcomparable",
         allocs,
         bytes,
     });
@@ -458,6 +555,19 @@ fn main() {
     });
 
     let (_, allocs, bytes) = measure(|| {
+        let d = McDecimal::from_str("123.456789").unwrap();
+        let encoded = d.to_vec().unwrap();
+        let decoded = McDecimal::from_slice(&encoded).unwrap();
+        format!("{decoded}")
+    });
+    rows.push(Row {
+        name: "roundtrip: str -> encode -> decode -> display",
+        lib: "memcomparable",
+        allocs,
+        bytes,
+    });
+
+    let (_, allocs, bytes) = measure(|| {
         let d: Decimal = "123.456789".parse().unwrap();
         d.decode()
     });
@@ -471,8 +581,8 @@ fn main() {
     // -- Print -------------------------------------------------------------
 
     println!();
-    println!("ordecimal vs decimal-bytes allocation report");
-    println!("=============================================");
+    println!("ordecimal vs decimal-bytes vs memcomparable allocation report");
+    println!("==============================================================");
     println!();
     print_table(&rows);
     println!();

@@ -60,6 +60,24 @@ fn bench_encode(c: &mut Criterion) {
         b.iter(|| Decimal::from(black_box(123.456_789_f64)));
     });
 
+    // Scientific notation
+    g.bench_function("ordecimal/from_str/sci_small", |b| {
+        b.iter(|| black_box("1.5e3").parse::<Decimal>().unwrap());
+    });
+    g.bench_function("ordecimal/from_str/sci_neg_exp", |b| {
+        b.iter(|| black_box("1.5e-3").parse::<Decimal>().unwrap());
+    });
+    g.bench_function("ordecimal/from_str/sci_dynamodb_min", |b| {
+        b.iter(|| black_box("1E-130").parse::<Decimal>().unwrap());
+    });
+    g.bench_function("ordecimal/from_str/sci_dynamodb_max", |b| {
+        b.iter(|| {
+            black_box("9.9999999999999999999999999999999999999E+125")
+                .parse::<Decimal>()
+                .unwrap()
+        });
+    });
+
     g.bench_function("ordecimal/special/nan", |b| {
         b.iter(Decimal::nan);
     });
@@ -91,6 +109,22 @@ fn bench_encode(c: &mut Criterion) {
 
     g.bench_function("decimal_bytes/try_from_f64", |b| {
         b.iter(|| DbDecimal::try_from(black_box(123.456_789_f64)).unwrap());
+    });
+
+    // Scientific notation
+    g.bench_function("decimal_bytes/from_str/sci_small", |b| {
+        b.iter(|| DbDecimal::from_str(black_box("1.5e3")).unwrap());
+    });
+    g.bench_function("decimal_bytes/from_str/sci_neg_exp", |b| {
+        b.iter(|| DbDecimal::from_str(black_box("1.5e-3")).unwrap());
+    });
+    g.bench_function("decimal_bytes/from_str/sci_dynamodb_min", |b| {
+        b.iter(|| DbDecimal::from_str(black_box("1E-130")).unwrap());
+    });
+    g.bench_function("decimal_bytes/from_str/sci_dynamodb_max", |b| {
+        b.iter(|| {
+            DbDecimal::from_str(black_box("9.9999999999999999999999999999999999999E+125")).unwrap()
+        });
     });
 
     g.bench_function("decimal_bytes/special/nan", |b| {

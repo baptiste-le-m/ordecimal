@@ -248,6 +248,53 @@ fn main() {
         bytes,
     });
 
+    // Scientific notation
+    let (_, allocs, bytes) = measure(|| "1.5e3".parse::<Decimal>().unwrap());
+    rows.push(Row {
+        name: "FromStr sci (\"1.5e3\")",
+        lib: "ordecimal",
+        allocs,
+        bytes,
+    });
+    let (_, allocs, bytes) = measure(|| DbDecimal::from_str("1.5e3").unwrap());
+    rows.push(Row {
+        name: "FromStr sci (\"1.5e3\")",
+        lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+
+    let (_, allocs, bytes) = measure(|| "1E-130".parse::<Decimal>().unwrap());
+    rows.push(Row {
+        name: "FromStr sci (\"1E-130\")",
+        lib: "ordecimal",
+        allocs,
+        bytes,
+    });
+    let (_, allocs, bytes) = measure(|| DbDecimal::from_str("1E-130").unwrap());
+    rows.push(Row {
+        name: "FromStr sci (\"1E-130\")",
+        lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+
+    let ddb_max = "9.9999999999999999999999999999999999999E+125";
+    let (_, allocs, bytes) = measure(|| ddb_max.parse::<Decimal>().unwrap());
+    rows.push(Row {
+        name: "FromStr sci (DynamoDB max)",
+        lib: "ordecimal",
+        allocs,
+        bytes,
+    });
+    let (_, allocs, bytes) = measure(|| DbDecimal::from_str(ddb_max).unwrap());
+    rows.push(Row {
+        name: "FromStr sci (DynamoDB max)",
+        lib: "decimal-bytes",
+        allocs,
+        bytes,
+    });
+
     // -- Decoding ----------------------------------------------------------
 
     // ordecimal decode()

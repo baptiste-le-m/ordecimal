@@ -110,6 +110,16 @@ fn main() {
     let neg_ddb38 = format!("-{}", &ddb38);
     add_str("DynamoDB 38 digits (neg)", &neg_ddb38);
 
+    // Scientific notation (DynamoDB-style)
+    add_str("sci: \"1.5e3\"", "1.5e3");
+    add_str("sci: \"1.5e-3\"", "1.5e-3");
+    add_str("sci: \"1E-130\" (DDB min)", "1E-130");
+    add_str(
+        "sci: \"9.99...E+125\" (DDB max)",
+        "9.9999999999999999999999999999999999999E+125",
+    );
+    add_str("sci: \"-2.5e4\"", "-2.5e4");
+
     // Larger values (beyond DynamoDB)
     let d100 = make_large_decimal(100);
     add_str("100 digits", &d100);

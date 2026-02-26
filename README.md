@@ -1,5 +1,8 @@
 # ordecimal
 
+[![crates.io](https://img.shields.io/crates/v/ordecimal.svg)](https://crates.io/crates/ordecimal)
+[![docs.rs](https://docs.rs/ordecimal/badge.svg)](https://docs.rs/ordecimal)
+
 A Rust implementation of the [decimalInfinite](https://arxiv.org/abs/1506.01598) encoding
 by Ghislain Fourny. It encodes arbitrary-precision decimals into variable-length byte strings
 that preserve numerical ordering under lexicographic comparison — useful anywhere you need
@@ -52,8 +55,9 @@ Example encodings from the paper:
 ```rust
 use ordecimal::{Decimal, DecodedDecimal};
 
-// from strings
+// from strings (plain or scientific notation)
 let d: Decimal = "123.456".parse().unwrap();
+let d: Decimal = "6.022e23".parse().unwrap();
 
 // from numeric types (no intermediate string, stack-only)
 let d = Decimal::from(42u64);
@@ -84,6 +88,17 @@ let owned = d.into_bytes();      // Vec<u8>
 Unlike IEEE 754, `Decimal` gives NaN a deterministic position in the total order:
 NaN == NaN is true, and NaN sorts after everything else (including +∞). This is
 intentional for sort-key use cases where every value needs a well-defined position.
+
+## Serde
+
+Enable the `serde` feature for `Serialize` / `Deserialize`:
+
+```toml
+ordecimal = { version = "0.2", features = ["serde"] }
+```
+
+Decimals serialize as their string representation in human-readable formats (JSON, TOML)
+and as raw bytes in binary formats (bincode).
 
 ## Reference
 

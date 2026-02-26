@@ -124,6 +124,62 @@ fn compute_complement_in_place(digits: &mut [u8]) {
     }
 }
 
+/// Decode significand directly into a caller-provided buffer, avoiding heap allocation.
+///
+/// Returns the number of digit values (0–9) written to `buf`.
+/// The caller must ensure `buf` is large enough; a 1536-byte buffer is sufficient
+/// for any encoded value up to ~1500 significant digits.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] if the reader runs out of bits or encounters
+/// invalid tetrade/declet values.
+pub fn decode_significand_to_buf(
+    reader: &mut BitReader,
+    negative: bool,
+    buf: &mut [u8],
+) -> DecodeResult<usize> {
+    if !reader.has_bits() {
+        return Err(DecodeError::UnexpectedEndOfInput);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let first_tetrade = reader.read_bits(4)? as u8;
+    if first_tetrade > 9 {
+        return Err(DecodeError::InvalidTetrade(first_tetrade));
+    }
+    buf[0] = first_tetrade;
+    let mut pos = 1;
+
+    while reader.remaining_bits() >= 10 {
+        #[allow(clippy::cast_possible_truncation)]
+        let declet = reader.read_bits(10)? as u16;
+        if declet > 999 {
+            return Err(DecodeError::InvalidDeclet(declet));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf[pos] = (declet / 100) as u8;
+            buf[pos + 1] = ((declet / 10) % 10) as u8;
+            buf[pos + 2] = (declet % 10) as u8;
+        }
+        pos += 3;
+    }
+
+    if negative {
+        compute_complement_in_place(&mut buf[..pos]);
+    }
+
+    if buf[0] == 0 || buf[0] > 9 {
+        return Err(DecodeError::InvalidSignificand(format!(
+            "first digit is {}",
+            buf[0]
+        )));
+    }
+
+    Ok(pos)
+}
+
 /// Decode the significand from tetrade and declets
 ///
 /// If negative is true, decodes as 10 - m (reverses the complement applied during encoding)

@@ -5,7 +5,7 @@
 use crate::decimal::SpecialValue;
 use crate::error::{DecodeError, DecodeResult};
 use crate::gamma::BitReader;
-use crate::significand::decode_significand;
+use crate::significand::{decode_significand, decode_significand_to_buf};
 
 /// Decoded decimal with semantic fields (for when field access is needed)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +71,111 @@ pub fn decode_to_parts(bytes: &[u8]) -> DecodeResult<DecodedValue> {
             }
         }
     }
+}
+
+/// Lightweight decoded parts that borrows significand from a caller-provided buffer.
+/// Used internally by Display / `to_plain_string` to avoid heap allocation.
+pub(crate) struct DecodedParts {
+    pub positive: bool,
+    pub exponent_positive: bool,
+    pub exponent: u64,
+    pub sig_len: usize,
+}
+
+/// Decode bytes into [`DecodedParts`], writing significand digits into `sig_buf`.
+///
+/// Returns `Ok(Ok(parts))` for regular numbers, `Ok(Err(special))` for special values.
+pub(crate) fn decode_to_buf(
+    bytes: &[u8],
+    sig_buf: &mut [u8],
+) -> DecodeResult<Result<DecodedParts, SpecialValue>> {
+    if bytes.is_empty() {
+        return Err(DecodeError::UnexpectedEndOfInput);
+    }
+
+    let mut reader = BitReader::new(bytes);
+    let sign_bit1 = reader.read_bit()?;
+    let sign_bit2 = reader.read_bit()?;
+
+    match (sign_bit1, sign_bit2) {
+        (false, false) => {
+            if !reader.has_bits() || is_all_zeros_from_position(&reader) {
+                return Ok(Err(SpecialValue::NegativeInfinity));
+            }
+            decode_regular_to_buf(&mut reader, false, sig_buf).map(Ok)
+        }
+        (false, true) => Ok(Err(SpecialValue::NegativeZero)),
+        (true, false) => {
+            if !reader.has_bits() || is_all_zeros_from_position(&reader) {
+                return Ok(Err(SpecialValue::PositiveZero));
+            }
+            decode_regular_to_buf(&mut reader, true, sig_buf).map(Ok)
+        }
+        (true, true) => {
+            if !reader.has_bits() {
+                return Ok(Err(SpecialValue::PositiveInfinity));
+            }
+            let third_bit = reader.read_bit()?;
+            if third_bit {
+                Ok(Err(SpecialValue::NaN))
+            } else {
+                Ok(Err(SpecialValue::PositiveInfinity))
+            }
+        }
+    }
+}
+
+/// Decode exponent + significand for a regular number, writing significand to `sig_buf`.
+fn decode_regular_to_buf(
+    reader: &mut BitReader,
+    positive: bool,
+    sig_buf: &mut [u8],
+) -> DecodeResult<DecodedParts> {
+    let first_bit = reader.read_bit()?;
+    let mut count = 1usize;
+    while reader.has_bits() {
+        match reader.peek_bit() {
+            Ok(bit) if bit == first_bit => {
+                reader.read_bit()?;
+                count += 1;
+            }
+            _ => break,
+        }
+    }
+
+    let terminating_bit = reader.read_bit()?;
+    if terminating_bit == first_bit {
+        return Err(DecodeError::InvalidGammaCode);
+    }
+
+    let remaining_value = reader.read_bits(count)?;
+    let negated = !first_bit;
+    let remaining_value = if negated {
+        let mask = (1u64 << count) - 1;
+        (!remaining_value) & mask
+    } else {
+        remaining_value
+    };
+
+    let binary_value = (1u64 << count) | remaining_value;
+    if binary_value < 2 {
+        return Err(DecodeError::InvalidGammaCode);
+    }
+    let exponent = binary_value - 2;
+
+    let exponent_positive = if positive { !negated } else { negated };
+    if exponent == 0 && !exponent_positive {
+        return Err(DecodeError::ZeroWithNegativeExponent);
+    }
+
+    let sig_len = decode_significand_to_buf(reader, !positive, sig_buf)?;
+
+    Ok(DecodedParts {
+        positive,
+        exponent_positive,
+        exponent,
+        sig_len,
+    })
 }
 
 fn is_all_zeros_from_position(reader: &BitReader) -> bool {

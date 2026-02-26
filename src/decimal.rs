@@ -1,4 +1,4 @@
-use crate::decoder::{decode_to_parts, DecodedDecimal, DecodedValue};
+use crate::decoder::{decode_to_buf, decode_to_parts, DecodedDecimal, DecodedValue};
 use crate::encoder::{encode_from_parts, encode_special_byte};
 use crate::error::{DecodeError, EncodeError, EncodeResult};
 use std::cmp::Ordering;
@@ -349,105 +349,179 @@ impl Decimal {
     /// (`"1.23 × 10^2"`), this method returns a plain positional string
     /// (`"123"`) suitable for serialization and interop.
     pub fn to_plain_string(&self) -> String {
-        match decode_to_parts(&self.bytes) {
-            Ok(DecodedValue::Special(s)) => match s {
-                SpecialValue::NegativeInfinity => "-inf".to_string(),
-                SpecialValue::NegativeZero => "-0".to_string(),
-                SpecialValue::PositiveZero => "0".to_string(),
-                SpecialValue::PositiveInfinity => "inf".to_string(),
-                SpecialValue::NaN => "nan".to_string(),
-            },
-            Ok(DecodedValue::Regular(d)) => {
-                // Strip trailing zeros from the significand
-                let sig_end = d
-                    .significand
-                    .iter()
-                    .rposition(|&x| x != 0)
-                    .map_or(1, |p| p + 1);
-                let sig = &d.significand[..sig_end];
-
-                let mut out = String::with_capacity(sig.len() + 4);
-                if !d.positive {
-                    out.push('-');
-                }
-
-                if d.exponent_positive || d.exponent == 0 {
-                    // Exponent ≥ 0: integer part has (exponent + 1) digits
-                    let int_digits = d.exponent as usize + 1;
-
-                    if int_digits >= sig.len() {
-                        // All significand digits are in the integer part;
-                        // pad with trailing zeros
-                        for &digit in sig {
-                            out.push(char::from(b'0' + digit));
-                        }
-                        for _ in 0..(int_digits - sig.len()) {
-                            out.push('0');
-                        }
-                    } else {
-                        // Split: some digits before the point, some after
-                        for &digit in &sig[..int_digits] {
-                            out.push(char::from(b'0' + digit));
-                        }
-                        out.push('.');
-                        for &digit in &sig[int_digits..] {
-                            out.push(char::from(b'0' + digit));
-                        }
-                    }
-                } else {
-                    // Negative exponent: number < 1 → "0." + (exponent-1) leading zeros + sig
-                    out.push_str("0.");
-                    for _ in 0..(d.exponent as usize - 1) {
-                        out.push('0');
-                    }
-                    for &digit in sig {
-                        out.push(char::from(b'0' + digit));
-                    }
-                }
-
-                out
-            }
-            Err(_) => "<invalid>".to_string(),
+        // Fast path: special values (single byte)
+        if self.bytes.len() == 1 {
+            return match self.bytes[0] {
+                0x00 => "-inf".to_string(),
+                0x40 => "-0".to_string(),
+                0x80 => "0".to_string(),
+                0xC0 => "inf".to_string(),
+                0xE0 => "nan".to_string(),
+                _ => "<invalid>".to_string(),
+            };
         }
+
+        // Decode to stack buffer — no heap allocation for significand
+        let mut sig_buf = [0u8; 1536];
+        let parts = match decode_to_buf(&self.bytes, &mut sig_buf) {
+            Ok(Ok(p)) => p,
+            Ok(Err(s)) => {
+                return match s {
+                    SpecialValue::NegativeInfinity => "-inf",
+                    SpecialValue::NegativeZero => "-0",
+                    SpecialValue::PositiveZero => "0",
+                    SpecialValue::PositiveInfinity => "inf",
+                    SpecialValue::NaN => "nan",
+                }
+                .to_string();
+            }
+            Err(_) => return "<invalid>".to_string(),
+        };
+
+        // Strip trailing zeros from significand
+        let sig_end = sig_buf[..parts.sig_len]
+            .iter()
+            .rposition(|&x| x != 0)
+            .map_or(1, |p| p + 1);
+
+        // Convert digit values to ASCII in-place
+        for b in &mut sig_buf[..sig_end] {
+            *b += b'0';
+        }
+        // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', all valid ASCII
+        let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
+
+        let mut out = String::with_capacity(sig.len() + 8);
+        if !parts.positive {
+            out.push('-');
+        }
+
+        if parts.exponent_positive || parts.exponent == 0 {
+            let int_digits = parts.exponent as usize + 1;
+
+            if int_digits >= sig.len() {
+                // All significand digits in integer part; pad with trailing zeros
+                out.push_str(sig);
+                // push_str a block of zeros is faster than char-by-char
+                const ZEROS: &str = "0000000000000000000000000000000000000000";
+                let mut remaining = int_digits - sig.len();
+                while remaining > 0 {
+                    let chunk = remaining.min(ZEROS.len());
+                    out.push_str(&ZEROS[..chunk]);
+                    remaining -= chunk;
+                }
+            } else {
+                // Split: some digits before the point, some after
+                out.push_str(&sig[..int_digits]);
+                out.push('.');
+                out.push_str(&sig[int_digits..]);
+            }
+        } else {
+            // Negative exponent: number < 1 → "0." + (exponent-1) leading zeros + sig
+            out.push_str("0.");
+            const ZEROS: &str = "0000000000000000000000000000000000000000";
+            let mut remaining = parts.exponent as usize - 1;
+            while remaining > 0 {
+                let chunk = remaining.min(ZEROS.len());
+                out.push_str(&ZEROS[..chunk]);
+                remaining -= chunk;
+            }
+            out.push_str(sig);
+        }
+
+        out
     }
+}
+
+/// Format a `u64` into a stack buffer as ASCII decimal.
+/// Returns `(start, end)` indices into `buf` for the formatted slice.
+#[inline]
+fn fmt_u64(mut n: u64, buf: &mut [u8; 20]) -> (usize, usize) {
+    if n == 0 {
+        buf[19] = b'0';
+        return (19, 20);
+    }
+    let mut pos = 20usize;
+    while n > 0 {
+        pos -= 1;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf[pos] = b'0' + (n % 10) as u8;
+        }
+        n /= 10;
+    }
+    (pos, 20)
 }
 
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match decode_to_parts(&self.bytes) {
-            Ok(DecodedValue::Regular(d)) => {
-                if !d.positive {
-                    f.write_str("-")?;
-                }
+        // Fast path: special values (single byte — no decode needed)
+        if self.bytes.len() == 1 {
+            return f.write_str(match self.bytes[0] {
+                0x00 => "-\u{221e}",
+                0x40 => "-0",
+                0x80 => "0",
+                0xC0 => "\u{221e}",
+                0xE0 => "NaN",
+                _ => "<invalid>",
+            });
+        }
 
-                // First significand digit + decimal point
-                write!(f, "{}.", d.significand[0])?;
-
-                // Remaining significand digits — written char-by-char to avoid allocation
-                for &digit in &d.significand[1..] {
-                    write!(f, "{digit}")?;
-                }
-
-                f.write_str(" × 10^")?;
-
-                if !d.exponent_positive {
-                    f.write_str("-")?;
-                }
-
-                write!(f, "{}", d.exponent)
-            }
-            Ok(DecodedValue::Special(s)) => {
-                let name = match s {
-                    SpecialValue::NegativeInfinity => "-∞",
+        // Decode to stack buffer — no heap allocation for significand
+        let mut sig_buf = [0u8; 1536];
+        let parts = match decode_to_buf(&self.bytes, &mut sig_buf) {
+            Ok(Ok(p)) => p,
+            Ok(Err(s)) => {
+                return f.write_str(match s {
+                    SpecialValue::NegativeInfinity => "-\u{221e}",
                     SpecialValue::NegativeZero => "-0",
                     SpecialValue::PositiveZero => "0",
-                    SpecialValue::PositiveInfinity => "∞",
+                    SpecialValue::PositiveInfinity => "\u{221e}",
                     SpecialValue::NaN => "NaN",
-                };
-                f.write_str(name)
+                });
             }
-            Err(_) => f.write_str("<invalid>"),
+            Err(_) => return f.write_str("<invalid>"),
+        };
+
+        // Strip trailing zeros from significand padding
+        let sig_end = sig_buf[..parts.sig_len]
+            .iter()
+            .rposition(|&x| x != 0)
+            .map_or(1, |p| p + 1);
+
+        // Convert digit values to ASCII in-place
+        for b in &mut sig_buf[..sig_end] {
+            *b += b'0';
         }
+
+        // Write sign
+        if !parts.positive {
+            f.write_str("-")?;
+        }
+
+        // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', all valid ASCII/UTF-8
+        let sig_str = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
+
+        // Write "d.ddd" — first digit, decimal point, remaining digits
+        f.write_str(&sig_str[..1])?;
+        f.write_str(".")?;
+        if sig_end > 1 {
+            f.write_str(&sig_str[1..])?;
+        } else {
+            f.write_str("0")?;
+        }
+
+        // Write " × 10^"
+        f.write_str(" \u{00d7} 10^")?;
+        if !parts.exponent_positive {
+            f.write_str("-")?;
+        }
+
+        // Format exponent without write! macro overhead
+        let mut exp_buf = [0u8; 20];
+        let (start, end) = fmt_u64(parts.exponent, &mut exp_buf);
+        // SAFETY: digits are b'0'..=b'9', valid ASCII
+        f.write_str(unsafe { std::str::from_utf8_unchecked(&exp_buf[start..end]) })
     }
 }
 
@@ -500,6 +574,33 @@ impl Default for Decimal {
     }
 }
 
+/// Extract decimal digits from a `u64` into a stack buffer.
+///
+/// Returns the number of digits written. Digits are stored most-significant
+/// first in `buf[0..len]`. Zero produces a single digit `0`.
+///
+/// Uses native `u64` arithmetic (faster than `u128` division on most platforms).
+fn u64_to_digits(mut value: u64, buf: &mut [u8; 20]) -> usize {
+    if value == 0 {
+        buf[0] = 0;
+        return 1;
+    }
+
+    let mut pos = 20;
+    while value > 0 {
+        pos -= 1;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf[pos] = (value % 10) as u8;
+        }
+        value /= 10;
+    }
+
+    let len = 20 - pos;
+    buf.copy_within(pos..20, 0);
+    len
+}
+
 /// Extract decimal digits from a `u128` into a stack buffer.
 ///
 /// Returns the number of digits written. Digits are stored most-significant
@@ -527,7 +628,29 @@ fn u128_to_digits(mut value: u128, buf: &mut [u8; 39]) -> usize {
     len
 }
 
-/// Core conversion: build a [`Decimal`] from an unsigned magnitude and a sign flag.
+/// Build a [`Decimal`] from a `u64` magnitude and a sign flag.
+///
+/// Uses native `u64` division (faster than `u128`) and a 20-byte stack buffer.
+fn from_u64_with_sign(value: u64, positive: bool) -> Decimal {
+    if value == 0 {
+        return Decimal::zero();
+    }
+
+    let mut buf = [0u8; 20];
+    let len = u64_to_digits(value, &mut buf);
+    let digits = &buf[..len];
+
+    #[allow(clippy::cast_possible_truncation)]
+    let exponent = (len - 1) as u64;
+
+    let sig_end = digits.iter().rposition(|&d| d != 0).map_or(1, |p| p + 1);
+    let significand = &digits[..sig_end];
+
+    let bytes = encode_from_parts(positive, true, exponent, significand);
+    Decimal { bytes }
+}
+
+/// Core conversion: build a [`Decimal`] from an unsigned `u128` magnitude and a sign flag.
 ///
 /// Uses a `[u8; 39]` stack buffer for digit extraction — no heap allocation
 /// beyond the final encoded [`Vec<u8>`].
@@ -554,20 +677,21 @@ fn from_unsigned_with_sign(value: u128, positive: bool) -> Decimal {
 
 impl From<u64> for Decimal {
     fn from(value: u64) -> Self {
-        from_unsigned_with_sign(u128::from(value), true)
+        from_u64_with_sign(value, true)
     }
 }
 
 impl From<i64> for Decimal {
     fn from(value: i64) -> Self {
-        // Handle i64::MIN without overflow: cast to i128 first, then negate
         #[allow(clippy::cast_sign_loss)]
-        let (positive, magnitude) = if value >= 0 {
-            (true, value as u128)
+        if value >= 0 {
+            from_u64_with_sign(value as u64, true)
+        } else if value == i64::MIN {
+            // i64::MIN.unsigned_abs() doesn't fit in i64, use u64 directly
+            from_u64_with_sign(value.unsigned_abs(), false)
         } else {
-            (false, (-i128::from(value)) as u128)
-        };
-        from_unsigned_with_sign(magnitude, positive)
+            from_u64_with_sign((-value) as u64, false)
+        }
     }
 }
 

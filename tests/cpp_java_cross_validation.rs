@@ -17,7 +17,11 @@ use ordecimal::Decimal;
 fn bits_string(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .flat_map(|b| (0..8).rev().map(move |i| if (b >> i) & 1 == 1 { '1' } else { '0' }))
+        .flat_map(|b| {
+            (0..8)
+                .rev()
+                .map(move |i| if (b >> i) & 1 == 1 { '1' } else { '0' })
+        })
         .collect()
 }
 
@@ -56,11 +60,7 @@ fn assert_encode_bits(input: &str, expected_bits: &str) {
 fn assert_roundtrip(input: &str) {
     let value: Decimal = input.parse().unwrap();
     let decoded = Decimal::from_bytes(value.as_bytes()).unwrap();
-    assert_eq!(
-        value, decoded,
-        "roundtrip bytes mismatch for {}",
-        input
-    );
+    assert_eq!(value, decoded, "roundtrip bytes mismatch for {}", input);
 
     // Also check plain-string roundtrip
     let plain = value.to_plain_string();
@@ -169,12 +169,42 @@ fn test_java_exact_bits_negative_large_integer() {
 #[test]
 fn test_roundtrip_cpp_vectors() {
     let test_cases = [
-        "0", "0.02", "0.2",
-        "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        "10", "11", "20", "100", "200", "2000", "20000",
-        "200000", "2000000", "20000000", "123456789",
-        "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9",
-        "-10", "-100", "-1000", "-123456789",
+        "0",
+        "0.02",
+        "0.2",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "20",
+        "100",
+        "200",
+        "2000",
+        "20000",
+        "200000",
+        "2000000",
+        "20000000",
+        "123456789",
+        "-1",
+        "-2",
+        "-3",
+        "-4",
+        "-5",
+        "-6",
+        "-7",
+        "-8",
+        "-9",
+        "-10",
+        "-100",
+        "-1000",
+        "-123456789",
     ];
 
     for case in &test_cases {
@@ -213,12 +243,8 @@ fn test_cpp_equality() {
         "-12341".parse::<Decimal>().unwrap()
     );
     assert_eq!(
-        "-12341.09237450928374509823745"
-            .parse::<Decimal>()
-            .unwrap(),
-        "-12341.09237450928374509823745"
-            .parse::<Decimal>()
-            .unwrap()
+        "-12341.09237450928374509823745".parse::<Decimal>().unwrap(),
+        "-12341.09237450928374509823745".parse::<Decimal>().unwrap()
     );
 
     // Very long number
@@ -262,8 +288,13 @@ fn test_cpp_less_than() {
             da.cmp(&db)
         );
         assert!(da <= db, "{} <= {} should be true", a, b);
-        assert!(!(da > db), "{} > {} should be false", a, b);
-        assert!(!(da >= db), "{} >= {} should be false", a, b);
+        assert_eq!(
+            da.cmp(&db),
+            std::cmp::Ordering::Less,
+            "{} should be strictly less than {}",
+            a,
+            b
+        );
     }
 }
 
@@ -276,15 +307,13 @@ fn test_cpp_negative_comparisons() {
         .unwrap();
     assert!(neg < pos);
     assert!(neg <= pos);
-    assert!(!(neg > pos));
-    assert!(!(neg >= pos));
+    assert_eq!(neg.cmp(&pos), std::cmp::Ordering::Less);
 
     // Negative self-equality with <= and >=
     let neg2: Decimal = "-0.12345".parse().unwrap();
-    assert!(!(neg < neg2));
-    assert!(!(neg > neg2));
-    assert!(neg <= neg2);
     assert!(neg >= neg2);
+    assert!(neg <= neg2);
+    assert_eq!(neg.cmp(&neg2), std::cmp::Ordering::Equal);
 }
 
 // =============================================================================
@@ -327,11 +356,7 @@ fn test_java_integer_roundtrip() {
         let value: Decimal = input.parse().unwrap();
         let plain = value.to_plain_string();
 
-        assert_eq!(
-            plain, input,
-            "roundtrip failed for {}: got '{}'",
-            i, plain
-        );
+        assert_eq!(plain, input, "roundtrip failed for {}: got '{}'", i, plain);
     }
 }
 
@@ -346,7 +371,10 @@ fn test_fuzzy_ordering_lcg() {
     struct Lcg(u64);
     impl Lcg {
         fn next_u32(&mut self) -> u32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) as u32
         }
         fn next_f64(&mut self) -> f64 {
@@ -378,9 +406,13 @@ fn test_fuzzy_ordering_lcg() {
         let actual = da.cmp(&db);
 
         assert_eq!(
-            actual, expected,
+            actual,
+            expected,
             "ordering mismatch for {} vs {}: expected {:?}, got {:?}\n  a: {}\n  b: {}",
-            a, b, expected, actual,
+            a,
+            b,
+            expected,
+            actual,
             bits_string(da.as_bytes()),
             bits_string(db.as_bytes())
         );
@@ -397,7 +429,10 @@ fn test_fuzzy_roundtrip_lcg() {
     struct Lcg(u64);
     impl Lcg {
         fn next_u32(&mut self) -> u32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) as u32
         }
         fn next_f64(&mut self) -> f64 {
@@ -433,13 +468,10 @@ fn test_fuzzy_roundtrip_lcg() {
 #[test]
 fn test_byte_comparison_order() {
     let ordered = [
-        "-1000000", "-100000", "-10000", "-1000", "-100", "-10",
-        "-9", "-8", "-7", "-6", "-5", "-4", "-3", "-2", "-1",
-        "-0.5", "-0.1", "-0.01", "-0.001",
-        "0",
-        "0.001", "0.01", "0.1", "0.5",
-        "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        "10", "100", "1000", "10000", "100000", "1000000",
+        "-1000000", "-100000", "-10000", "-1000", "-100", "-10", "-9", "-8", "-7", "-6", "-5",
+        "-4", "-3", "-2", "-1", "-0.5", "-0.1", "-0.01", "-0.001", "0", "0.001", "0.01", "0.1",
+        "0.5", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "100", "1000", "10000", "100000",
+        "1000000",
     ];
 
     let encoded: Vec<(&str, Decimal)> = ordered
@@ -455,7 +487,8 @@ fn test_byte_comparison_order() {
         assert!(
             dec_a < dec_b,
             "Decimal order broken: {} < {} failed",
-            name_a, name_b
+            name_a,
+            name_b
         );
 
         // Raw byte comparison (unsigned)
@@ -476,7 +509,8 @@ fn test_byte_comparison_order() {
 
 #[test]
 fn test_very_long_number_roundtrip() {
-    let long_pos = "12341234059823408923450923745092837450982374512341234059823408923450923745092837450982374";
+    let long_pos =
+        "12341234059823408923450923745092837450982374512341234059823408923450923745092837450982374";
     let long_neg = "-12341234059823408923450923745092837450982374512341234059823408923450923745092837450982374";
 
     assert_roundtrip(long_pos);
@@ -491,12 +525,23 @@ fn test_very_long_number_roundtrip() {
 #[test]
 fn test_decimal_fractions_roundtrip() {
     let cases = [
-        "0.1", "0.01", "0.001", "0.0001",
-        "0.123456789", "0.000000001",
-        "-0.1", "-0.01", "-0.001",
-        "-0.123456789", "-0.000000001",
-        "1.23", "12.345", "123.4567",
-        "-1.23", "-12.345", "-123.4567",
+        "0.1",
+        "0.01",
+        "0.001",
+        "0.0001",
+        "0.123456789",
+        "0.000000001",
+        "-0.1",
+        "-0.01",
+        "-0.001",
+        "-0.123456789",
+        "-0.000000001",
+        "1.23",
+        "12.345",
+        "123.4567",
+        "-1.23",
+        "-12.345",
+        "-123.4567",
     ];
 
     for case in &cases {

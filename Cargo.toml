@@ -11,13 +11,19 @@ keywords = ["decimal", "encoding", "order-preserving", "database", "sort-key"]
 categories = ["encoding", "database"]
 exclude = [".github/"]
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
+serde = { version = "1", optional = true }
 thiserror = "1.0"
 
 [dev-dependencies]
+bincode = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 decimal-bytes = "0.4"
 proptest = "1.0"
+serde_json = "1"
 
 [[bench]]
 name = "benchmarks"

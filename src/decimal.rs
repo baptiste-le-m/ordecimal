@@ -307,6 +307,76 @@ impl FromStr for Decimal {
     }
 }
 
+impl Decimal {
+    /// Produce a plain decimal string that can round-trip through [`FromStr`].
+    ///
+    /// Unlike [`Display`](fmt::Display), which outputs scientific notation
+    /// (`"1.23 × 10^2"`), this method returns a plain positional string
+    /// (`"123"`) suitable for serialization and interop.
+    pub fn to_plain_string(&self) -> String {
+        match decode_to_parts(&self.bytes) {
+            Ok(DecodedValue::Special(s)) => match s {
+                SpecialValue::NegativeInfinity => "-inf".to_string(),
+                SpecialValue::NegativeZero => "-0".to_string(),
+                SpecialValue::PositiveZero => "0".to_string(),
+                SpecialValue::PositiveInfinity => "inf".to_string(),
+                SpecialValue::NaN => "nan".to_string(),
+            },
+            Ok(DecodedValue::Regular(d)) => {
+                // Strip trailing zeros from the significand
+                let sig_end = d
+                    .significand
+                    .iter()
+                    .rposition(|&x| x != 0)
+                    .map_or(1, |p| p + 1);
+                let sig = &d.significand[..sig_end];
+
+                let mut out = String::with_capacity(sig.len() + 4);
+                if !d.positive {
+                    out.push('-');
+                }
+
+                if d.exponent_positive || d.exponent == 0 {
+                    // Exponent ≥ 0: integer part has (exponent + 1) digits
+                    let int_digits = d.exponent as usize + 1;
+
+                    if int_digits >= sig.len() {
+                        // All significand digits are in the integer part;
+                        // pad with trailing zeros
+                        for &digit in sig {
+                            out.push(char::from(b'0' + digit));
+                        }
+                        for _ in 0..(int_digits - sig.len()) {
+                            out.push('0');
+                        }
+                    } else {
+                        // Split: some digits before the point, some after
+                        for &digit in &sig[..int_digits] {
+                            out.push(char::from(b'0' + digit));
+                        }
+                        out.push('.');
+                        for &digit in &sig[int_digits..] {
+                            out.push(char::from(b'0' + digit));
+                        }
+                    }
+                } else {
+                    // Negative exponent: number < 1 → "0." + (exponent-1) leading zeros + sig
+                    out.push_str("0.");
+                    for _ in 0..(d.exponent as usize - 1) {
+                        out.push('0');
+                    }
+                    for &digit in sig {
+                        out.push(char::from(b'0' + digit));
+                    }
+                }
+
+                out
+            }
+            Err(_) => "<invalid>".to_string(),
+        }
+    }
+}
+
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match decode_to_parts(&self.bytes) {

@@ -51,6 +51,8 @@ pub(crate) mod decoder;
 pub(crate) mod encoder;
 pub(crate) mod error;
 pub(crate) mod gamma;
+#[cfg(feature = "serde")]
+mod serde_impl;
 pub(crate) mod significand;
 
 // Re-export main types and functions

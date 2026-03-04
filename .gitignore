@@ -1,3 +1,6 @@
 /target
 /.benches
 decimalInfinit.pdf
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

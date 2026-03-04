@@ -222,6 +222,12 @@ fn decode_regular(reader: &mut BitReader, positive: bool) -> DecodeResult<Decode
         return Err(DecodeError::InvalidGammaCode);
     }
 
+    // The gamma code reconstructs a value via `(1u64 << count) | data`,
+    // so count must be < 64 to avoid shift overflow.
+    if count >= 64 {
+        return Err(DecodeError::InvalidGammaCode);
+    }
+
     // Read the remaining `count` bits in one batch
     let remaining_value = reader.read_bits(count)?;
 

@@ -1,4 +1,4 @@
-use crate::decoder::{decode_to_buf, decode_to_parts, DecodedDecimal, DecodedValue};
+use crate::decoder::{decode_to_buf, decode_to_parts, DecodedDecimal, DecodedParts, DecodedValue};
 use crate::encoder::{encode_from_parts, encode_special_byte};
 use crate::error::{DecodeError, EncodeError, EncodeResult};
 use std::cmp::Ordering;
@@ -369,41 +369,67 @@ impl Decimal {
             };
         }
 
-        // Decode to stack buffer — no heap allocation for significand
+        // Try decoding to a stack buffer first (no heap allocation for ≤1536
+        // significant digits, which covers all practical use cases).
         let mut sig_buf = [0u8; 1536];
-        let parts = match decode_to_buf(&self.bytes, &mut sig_buf) {
-            Ok(Ok(p)) => p,
-            Ok(Err(s)) => {
-                return match s {
-                    SpecialValue::NegativeInfinity => "-inf",
-                    SpecialValue::NegativeZero => "-0",
-                    SpecialValue::PositiveZero => "0",
-                    SpecialValue::PositiveInfinity => "inf",
-                    SpecialValue::NaN => "nan",
+        match decode_to_buf(&self.bytes, &mut sig_buf) {
+            Ok(Ok(parts)) => {
+                let sig_end = sig_buf[..parts.sig_len]
+                    .iter()
+                    .rposition(|&x| x != 0)
+                    .map_or(1, |p| p + 1);
+                for b in &mut sig_buf[..sig_end] {
+                    *b += b'0';
                 }
-                .to_string();
+                // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', valid ASCII
+                let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
+                Self::format_plain_or_scientific(sig, &parts)
             }
+            Ok(Err(s)) => match s {
+                SpecialValue::NegativeInfinity => "-inf",
+                SpecialValue::NegativeZero => "-0",
+                SpecialValue::PositiveZero => "0",
+                SpecialValue::PositiveInfinity => "inf",
+                SpecialValue::NaN => "nan",
+            }
+            .to_string(),
+            // Stack buffer too small — fall back to heap-based decode
+            Err(_) => self.to_plain_string_heap(),
+        }
+    }
+
+    /// Heap-based fallback for `to_plain_string` when the significand exceeds
+    /// the 1536-byte stack buffer.
+    fn to_plain_string_heap(&self) -> String {
+        let decoded = match decode_to_parts(&self.bytes) {
+            Ok(DecodedValue::Regular(d)) => d,
+            Ok(DecodedValue::Special(_)) => unreachable!("specials handled before this path"),
             Err(_) => return "<invalid>".to_string(),
         };
 
-        // Strip trailing zeros from significand
-        let sig_end = sig_buf[..parts.sig_len]
+        let sig_end = decoded
+            .significand
             .iter()
             .rposition(|&x| x != 0)
             .map_or(1, |p| p + 1);
-
-        // Convert digit values to ASCII in-place
-        for b in &mut sig_buf[..sig_end] {
+        let mut sig_vec: Vec<u8> = decoded.significand[..sig_end].to_vec();
+        for b in &mut sig_vec {
             *b += b'0';
         }
-        // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', all valid ASCII
-        let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
+        // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', valid ASCII
+        let sig = unsafe { std::str::from_utf8_unchecked(&sig_vec) };
 
+        let parts = DecodedParts {
+            positive: decoded.positive,
+            exponent_positive: decoded.exponent_positive,
+            exponent: decoded.exponent,
+            sig_len: decoded.significand.len(),
+        };
         Self::format_plain_or_scientific(sig, &parts)
     }
 
-    /// Core formatting logic: positional for moderate exponents, scientific for extreme ones.
-    fn format_plain_or_scientific(sig: &str, parts: &crate::decoder::DecodedParts) -> String {
+    /// Core formatting logic shared by stack-buffer and heap-buffer paths.
+    fn format_plain_or_scientific(sig: &str, parts: &DecodedParts) -> String {
         let mut out = String::with_capacity(sig.len() + 8);
         if !parts.positive {
             out.push('-');
@@ -451,11 +477,7 @@ impl Decimal {
     }
 
     /// Format as `d.dddeSIGNexp` into the already-sign-prefixed `out` buffer.
-    fn format_scientific(
-        out: &mut String,
-        sig: &str,
-        parts: &crate::decoder::DecodedParts,
-    ) -> String {
+    fn format_scientific(out: &mut String, sig: &str, parts: &DecodedParts) -> String {
         out.push_str(&sig[..1]);
         if sig.len() > 1 {
             out.push('.');
@@ -1348,5 +1370,77 @@ mod tests {
 
         // Verify min positive is greater than zero
         assert!(Decimal::zero() < min_pos);
+    }
+
+    // Regression tests for fuzz-discovered OOM in to_plain_string (extreme exponents)
+    #[test]
+    fn to_plain_string_extreme_exponent_no_oom() {
+        // These inputs previously caused to_plain_string to allocate billions
+        // of zero-padding bytes.  Now it falls back to scientific notation.
+        let cases = ["1E100200000000", "15.001001080E01084888800", "1e-999999999"];
+        for input in &cases {
+            let d: Decimal = input.parse().unwrap();
+            let plain = d.to_plain_string();
+            // Must be compact (scientific notation), not positional
+            assert!(
+                plain.len() < 10_000,
+                "to_plain_string too large ({} bytes) for input {input:?}",
+                plain.len(),
+            );
+            // Must roundtrip
+            let d2: Decimal = plain.parse().unwrap();
+            assert_eq!(
+                d.as_bytes(),
+                d2.as_bytes(),
+                "roundtrip failed for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_plain_string_uses_positional_for_moderate_exponents() {
+        // Exponents within the threshold should still produce plain positional output
+        let d: Decimal = "1e5".parse().unwrap();
+        assert_eq!(d.to_plain_string(), "100000");
+
+        let d: Decimal = "1.23e10".parse().unwrap();
+        assert_eq!(d.to_plain_string(), "12300000000");
+
+        let d: Decimal = "0.00123".parse().unwrap();
+        assert_eq!(d.to_plain_string(), "0.00123");
+    }
+
+    #[test]
+    fn to_plain_string_scientific_roundtrip() {
+        // Large positive exponent
+        let d: Decimal = "1.5e5000".parse().unwrap();
+        let plain = d.to_plain_string();
+        assert!(
+            plain.contains('e'),
+            "expected scientific notation, got {plain:?}"
+        );
+        let d2: Decimal = plain.parse().unwrap();
+        assert_eq!(d.as_bytes(), d2.as_bytes());
+
+        // Large negative exponent
+        let d: Decimal = "1.5e-5000".parse().unwrap();
+        let plain = d.to_plain_string();
+        assert!(
+            plain.contains('e'),
+            "expected scientific notation, got {plain:?}"
+        );
+        let d2: Decimal = plain.parse().unwrap();
+        assert_eq!(d.as_bytes(), d2.as_bytes());
+
+        // Negative number with large exponent
+        let d: Decimal = "-3.14e9999".parse().unwrap();
+        let plain = d.to_plain_string();
+        assert!(plain.starts_with('-'), "expected negative sign");
+        assert!(
+            plain.contains('e'),
+            "expected scientific notation, got {plain:?}"
+        );
+        let d2: Decimal = plain.parse().unwrap();
+        assert_eq!(d.as_bytes(), d2.as_bytes());
     }
 }

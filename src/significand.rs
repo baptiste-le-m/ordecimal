@@ -127,13 +127,12 @@ fn compute_complement_in_place(digits: &mut [u8]) {
 /// Decode significand directly into a caller-provided buffer, avoiding heap allocation.
 ///
 /// Returns the number of digit values (0–9) written to `buf`.
-/// The caller must ensure `buf` is large enough; a 1536-byte buffer is sufficient
-/// for any encoded value up to ~1500 significant digits.
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] if the reader runs out of bits or encounters
-/// invalid tetrade/declet values.
+/// Returns [`DecodeError::BufferTooShort`] if the significand has more digits
+/// than `buf` can hold, or other [`DecodeError`] variants if the reader runs
+/// out of bits or encounters invalid tetrade/declet values.
 pub fn decode_significand_to_buf(
     reader: &mut BitReader,
     negative: bool,
@@ -152,6 +151,12 @@ pub fn decode_significand_to_buf(
     let mut pos = 1;
 
     while reader.remaining_bits() >= 10 {
+        if pos + 2 >= buf.len() {
+            return Err(DecodeError::BufferTooShort {
+                expected: pos + 3,
+                actual: buf.len(),
+            });
+        }
         #[allow(clippy::cast_possible_truncation)]
         let declet = reader.read_bits(10)? as u16;
         if declet > 999 {

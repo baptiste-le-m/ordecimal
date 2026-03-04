@@ -756,8 +756,10 @@ impl From<i32> for Decimal {
 /// Fixed-capacity stack buffer that implements `fmt::Write`.
 ///
 /// Used by the `From<f64>` / `From<f32>` impls to format a float into
-/// a string without heap allocation. 25 bytes is enough for any `f64`
-/// (sign + up to 17 significant digits + decimal point + 'e' + exponent).
+/// a string without heap allocation.  25 bytes is enough for any `f64`
+/// in scientific notation: sign (1) + leading digit (1) + decimal point (1)
+/// + up to 16 fractional digits + `e` (1) + exponent sign (1) + exponent
+/// digits (up to 3) = 24 bytes maximum.
 struct StackBuf {
     buf: [u8; 25],
     len: usize,
@@ -820,8 +822,11 @@ impl From<f64> for Decimal {
         }
 
         let mut buf = StackBuf::new();
-        // Rust's f64 Display produces the shortest roundtrip representation
-        write!(buf, "{value}").expect("f64 Display should fit in 25 bytes");
+        // Use scientific (LowerExp) notation so the output is always compact.
+        // Rust's `{:e}` produces the shortest roundtrip representation in
+        // scientific form (e.g. "1.5e0", "-2.3e-223"), which is guaranteed
+        // to fit in 25 bytes for any finite, non-zero f64.
+        write!(buf, "{value:e}").expect("f64 scientific notation should fit in 25 bytes");
         // Delegate to FromStr — the string is already validated decimal
         buf.as_str()
             .parse()

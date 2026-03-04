@@ -820,8 +820,8 @@ impl From<i32> for Decimal {
 ///
 /// Used by the `From<f64>` / `From<f32>` impls to format a float into
 /// a string without heap allocation.  25 bytes is enough for any `f64`
-/// in scientific notation: sign (1) + leading digit (1) + decimal point (1)
-/// + up to 16 fractional digits + `e` (1) + exponent sign (1) + exponent
+/// in scientific notation: sign (1) + leading digit (1) + decimal point (1) +
+/// up to 16 fractional digits + `e` (1) + exponent sign (1) + exponent
 /// digits (up to 3) = 24 bytes maximum.
 struct StackBuf {
     buf: [u8; 25],

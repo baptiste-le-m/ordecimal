@@ -342,12 +342,20 @@ impl FromStr for Decimal {
     }
 }
 
+/// Maximum exponent magnitude for plain positional output in
+/// [`Decimal::to_plain_string`].  Beyond this threshold the method falls back
+/// to scientific notation (`"1.23e500"`) to avoid unbounded memory allocation.
+/// 1000 is generous: DynamoDB supports at most 10^125, and IEEE decimal128
+/// goes up to 10^6144.
+const MAX_PLAIN_EXPONENT: u64 = 1000;
+
 impl Decimal {
-    /// Produce a plain decimal string that can round-trip through [`FromStr`].
+    /// Produce a decimal string that can round-trip through [`FromStr`].
     ///
-    /// Unlike [`Display`](fmt::Display), which outputs scientific notation
-    /// (`"1.23 × 10^2"`), this method returns a plain positional string
-    /// (`"123"`) suitable for serialization and interop.
+    /// For moderate exponents (magnitude ≤ 1000) the output is a plain
+    /// positional string (`"123"`, `"0.005"`).  For extreme exponents the
+    /// method falls back to scientific notation (`"1e100200000000"`) to
+    /// prevent unbounded memory allocation.
     pub fn to_plain_string(&self) -> String {
         // Fast path: special values (single byte)
         if self.bytes.len() == 1 {
@@ -391,9 +399,20 @@ impl Decimal {
         // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', all valid ASCII
         let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
 
+        Self::format_plain_or_scientific(sig, &parts)
+    }
+
+    /// Core formatting logic: positional for moderate exponents, scientific for extreme ones.
+    fn format_plain_or_scientific(sig: &str, parts: &crate::decoder::DecodedParts) -> String {
         let mut out = String::with_capacity(sig.len() + 8);
         if !parts.positive {
             out.push('-');
+        }
+
+        // For extreme exponents, fall back to scientific notation to avoid
+        // allocating a string with billions of zero-padding characters.
+        if parts.exponent > MAX_PLAIN_EXPONENT {
+            return Self::format_scientific(&mut out, sig, parts);
         }
 
         if parts.exponent_positive || parts.exponent == 0 {
@@ -402,7 +421,6 @@ impl Decimal {
             if int_digits >= sig.len() {
                 // All significand digits in integer part; pad with trailing zeros
                 out.push_str(sig);
-                // push_str a block of zeros is faster than char-by-char
                 const ZEROS: &str = "0000000000000000000000000000000000000000";
                 let mut remaining = int_digits - sig.len();
                 while remaining > 0 {
@@ -430,6 +448,29 @@ impl Decimal {
         }
 
         out
+    }
+
+    /// Format as `d.dddeSIGNexp` into the already-sign-prefixed `out` buffer.
+    fn format_scientific(
+        out: &mut String,
+        sig: &str,
+        parts: &crate::decoder::DecodedParts,
+    ) -> String {
+        out.push_str(&sig[..1]);
+        if sig.len() > 1 {
+            out.push('.');
+            out.push_str(&sig[1..]);
+        }
+        out.push('e');
+        if !parts.exponent_positive {
+            out.push('-');
+        }
+        // Format exponent without pulling in `write!` / `format!`
+        let mut exp_buf = [0u8; 20];
+        let (start, end) = fmt_u64(parts.exponent, &mut exp_buf);
+        // SAFETY: digits are b'0'..=b'9', valid ASCII
+        out.push_str(unsafe { std::str::from_utf8_unchecked(&exp_buf[start..end]) });
+        std::mem::take(out)
     }
 }
 

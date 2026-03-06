@@ -33,7 +33,7 @@ The encoding uses a STEM format (Sign, exponent sign (**T**), **E**xponent, **M*
 
 | Field | Size | Description |
 |-------|------|-------------|
-| S | 2 bits | `00` = negative, `01` = −0, `10` = +0 or positive, `11` = +∞ / NaN |
+| S | 2 bits | `00` = negative, `10` = +0 or positive |
 | T | 1 bit | Exponent sign (flipped for negatives to preserve order) |
 | E | variable | Exponent, modified Elias Gamma code (offset +2) |
 | M | variable | Significand: first digit as 4-bit tetrade, then groups of 3 digits packed into 10-bit declets |
@@ -53,7 +53,7 @@ Example encodings from the paper:
 ## API
 
 ```rust
-use ordecimal::{Decimal, DecodedDecimal};
+use ordecimal::Decimal;
 
 // from strings (plain or scientific notation)
 let d: Decimal = "123.456".parse().unwrap();
@@ -62,39 +62,26 @@ let d: Decimal = "6.022e23".parse().unwrap();
 // from numeric types (no intermediate string, stack-only)
 let d = Decimal::from(42u64);
 let d = Decimal::from(-7i32);
-let d = Decimal::from(3.14f64);
+let d = Decimal::try_from(3.14f64).unwrap();
 
-// special values
-let _ = Decimal::infinity();
-let _ = Decimal::neg_infinity();
-let _ = Decimal::nan();
+// zero
 let _ = Decimal::zero();
-
-// inspect components
-if let Some(dec) = d.decode() {
-    println!("{:?} × 10^{}", dec.significand, dec.exponent);
-}
 
 // raw bytes
 let bytes = d.as_bytes();        // &[u8], zero-copy
 let owned = d.into_bytes();      // Vec<u8>
 ```
 
-`decode()` returns `None` for special values (±0, ±∞, NaN) — check with
-`is_zero()`, `is_nan()`, `is_infinity()` instead.
-
-### NaN ordering
-
-Unlike IEEE 754, `Decimal` gives NaN a deterministic position in the total order:
-NaN == NaN is true, and NaN sorts after everything else (including +∞). This is
-intentional for sort-key use cases where every value needs a well-defined position.
+All `Decimal` values are finite, non-NaN numbers. Parsing `"inf"`, `"nan"`,
+etc. returns an error, and `TryFrom<f64>` rejects NaN/Infinity.
+Negative zero (`"-0"`) is normalized to positive zero.
 
 ## Serde
 
 Enable the `serde` feature for `Serialize` / `Deserialize`:
 
 ```toml
-ordecimal = { version = "0.2", features = ["serde"] }
+ordecimal = { version = "0.3", features = ["serde"] }
 ```
 
 Decimals serialize as their string representation in human-readable formats (JSON, TOML)
@@ -106,7 +93,7 @@ Enable the `rust_decimal` feature to convert between `ordecimal::Decimal` and
 [`rust_decimal::Decimal`](https://docs.rs/rust_decimal):
 
 ```toml
-ordecimal = { version = "0.2", features = ["rust_decimal"] }
+ordecimal = { version = "0.3", features = ["rust_decimal"] }
 ```
 
 ```rust
@@ -116,7 +103,7 @@ use ordecimal::Decimal;
 let rd = rust_decimal::Decimal::new(123_456, 3); // 123.456
 let od = Decimal::from(rd);
 
-// ordecimal → rust_decimal (fallible — rejects infinity, NaN, and out-of-range values)
+// ordecimal → rust_decimal (fallible — rejects out-of-range values)
 let rd_back = rust_decimal::Decimal::try_from(&od).unwrap();
 ```
 

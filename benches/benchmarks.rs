@@ -57,8 +57,8 @@ fn bench_encode(c: &mut Criterion) {
         b.iter(|| Decimal::from(black_box(123_456_789_u64)));
     });
 
-    g.bench_function("ordecimal/from_f64", |b| {
-        b.iter(|| Decimal::from(black_box(123.456_789_f64)));
+    g.bench_function("ordecimal/try_from_f64", |b| {
+        b.iter(|| Decimal::try_from(black_box(123.456_789_f64)).unwrap());
     });
 
     // Scientific notation
@@ -79,9 +79,6 @@ fn bench_encode(c: &mut Criterion) {
         });
     });
 
-    g.bench_function("ordecimal/special/nan", |b| {
-        b.iter(Decimal::nan);
-    });
     g.bench_function("ordecimal/special/zero", |b| {
         b.iter(Decimal::zero);
     });
@@ -195,21 +192,21 @@ fn bench_decode(c: &mut Criterion) {
     let large: Decimal = make_large_decimal(100).parse().unwrap();
     let very_large: Decimal = make_large_decimal(1000).parse().unwrap();
 
-    // ordecimal: decode() — structured decode
-    g.bench_function("ordecimal/decode/small", |b| {
-        b.iter(|| black_box(&small).decode());
+    // ordecimal: to_plain_string — decode + format
+    g.bench_function("ordecimal/to_plain_string/small", |b| {
+        b.iter(|| black_box(&small).to_plain_string());
     });
-    g.bench_function("ordecimal/decode/medium", |b| {
-        b.iter(|| black_box(&medium).decode());
+    g.bench_function("ordecimal/to_plain_string/medium", |b| {
+        b.iter(|| black_box(&medium).to_plain_string());
     });
-    g.bench_function("ordecimal/decode/dynamodb_38d", |b| {
-        b.iter(|| black_box(&dynamodb).decode());
+    g.bench_function("ordecimal/to_plain_string/dynamodb_38d", |b| {
+        b.iter(|| black_box(&dynamodb).to_plain_string());
     });
-    g.bench_function("ordecimal/decode/large_100d", |b| {
-        b.iter(|| black_box(&large).decode());
+    g.bench_function("ordecimal/to_plain_string/large_100d", |b| {
+        b.iter(|| black_box(&large).to_plain_string());
     });
-    g.bench_function("ordecimal/decode/very_large_1000d", |b| {
-        b.iter(|| black_box(&very_large).decode());
+    g.bench_function("ordecimal/to_plain_string/very_large_1000d", |b| {
+        b.iter(|| black_box(&very_large).to_plain_string());
     });
 
     // memcomparable: decode from bytes
@@ -421,14 +418,14 @@ fn bench_roundtrip(c: &mut Criterion) {
             },
         );
 
-        // ordecimal: String -> Decimal -> decode()
+        // ordecimal: String -> Decimal -> to_plain_string
         g.bench_with_input(
-            BenchmarkId::new("ordecimal/str_encode_decode", name),
+            BenchmarkId::new("ordecimal/str_encode_to_plain_string", name),
             input,
             |b, &s| {
                 b.iter(|| {
                     let d: Decimal = black_box(s).parse().unwrap();
-                    d.decode()
+                    d.to_plain_string()
                 });
             },
         );

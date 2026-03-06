@@ -99,26 +99,19 @@ mod tests {
     }
 
     #[test]
-    fn test_json_roundtrip_special_values() {
-        for (value, expected_str) in [
-            (Decimal::infinity(), "\"+inf\""),
-            (Decimal::neg_infinity(), "\"-inf\""),
-            (Decimal::nan(), "\"nan\""),
-        ] {
-            let json = serde_json::to_string(&value).unwrap();
-            // We don't assert exact JSON string since Display uses Unicode symbols,
-            // but the roundtrip must work via FromStr on the Display output.
-            let restored: Decimal = serde_json::from_str(&json).unwrap();
-            assert_eq!(value, restored, "roundtrip failed for {expected_str}");
-        }
-    }
-
-    #[test]
     fn test_json_deserialize_from_plain_number_string() {
         // Users will likely provide plain number strings in JSON
         let d: Decimal = serde_json::from_str("\"99.99\"").unwrap();
         let expected: Decimal = "99.99".parse().unwrap();
         assert_eq!(d, expected);
+    }
+
+    #[test]
+    fn test_json_rejects_special_values() {
+        // These should fail since inf/nan are no longer valid
+        assert!(serde_json::from_str::<Decimal>("\"inf\"").is_err());
+        assert!(serde_json::from_str::<Decimal>("\"-inf\"").is_err());
+        assert!(serde_json::from_str::<Decimal>("\"nan\"").is_err());
     }
 
     // -- bincode (binary) -----------------------------------------------------
@@ -145,15 +138,6 @@ mod tests {
         let encoded = bincode::serialize(&original).unwrap();
         let restored: Decimal = bincode::deserialize(&encoded).unwrap();
         assert_eq!(original, restored);
-    }
-
-    #[test]
-    fn test_bincode_roundtrip_special_values() {
-        for value in [Decimal::infinity(), Decimal::neg_infinity(), Decimal::nan()] {
-            let encoded = bincode::serialize(&value).unwrap();
-            let restored: Decimal = bincode::deserialize(&encoded).unwrap();
-            assert_eq!(value, restored);
-        }
     }
 
     #[test]

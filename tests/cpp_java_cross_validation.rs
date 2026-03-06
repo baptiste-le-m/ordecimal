@@ -399,8 +399,8 @@ fn test_fuzzy_ordering_lcg() {
             continue;
         }
 
-        let da = Decimal::from(a);
-        let db = Decimal::from(b);
+        let da = Decimal::try_from(a).unwrap();
+        let db = Decimal::try_from(b).unwrap();
 
         let expected = a.partial_cmp(&b).unwrap();
         let actual = da.cmp(&db);
@@ -449,7 +449,7 @@ fn test_fuzzy_roundtrip_lcg() {
 
     for _ in 0..iterations {
         let val = rng.next_random();
-        let decimal = Decimal::from(val);
+        let decimal = Decimal::try_from(val).unwrap();
         let decoded = Decimal::from_bytes(decimal.as_bytes()).unwrap();
         assert_eq!(
             decimal.as_bytes(),

@@ -3,24 +3,11 @@
 //! Based on the paper "decimalInfinite: All Decimals In Bits" by Ghislain Fourny
 //! and the reference `JSONiq` implementation.
 
-use crate::decimal::SpecialValue;
 use crate::gamma::BitWriter;
 use crate::significand::encode_significand;
 
-/// Return the single encoded byte for a special value (Figure 11 of the paper).
-///
-/// Callers wrap this in a [`Vec`] only when constructing a [`Decimal`](crate::decimal::Decimal); keeping
-/// this as a plain [`u8`] avoids a heap allocation on every special-value path.
-#[must_use]
-pub const fn encode_special_byte(value: SpecialValue) -> u8 {
-    match value {
-        SpecialValue::NegativeInfinity => 0b0000_0000, // 00
-        SpecialValue::NegativeZero => 0b0100_0000,     // 01
-        SpecialValue::PositiveZero => 0b1000_0000,     // 10
-        SpecialValue::PositiveInfinity => 0b1100_0000, // 11
-        SpecialValue::NaN => 0b1110_0000,              // 111
-    }
-}
+/// The single encoded byte for positive zero (`10` padded to `0x80`).
+pub(crate) const POSITIVE_ZERO_BYTE: u8 = 0b1000_0000;
 
 /// Encode from semantic parts (for internal use during parsing)
 pub fn encode_from_parts(
@@ -104,14 +91,7 @@ mod tests {
 
     #[test]
     fn test_encode_zero() {
-        let encoded = encode_special_byte(SpecialValue::PositiveZero);
-        assert_eq!(encoded & 0xC0, 0x80); // Should start with 10
-    }
-
-    #[test]
-    fn test_encode_positive_infinity() {
-        let encoded = encode_special_byte(SpecialValue::PositiveInfinity);
-        assert_eq!(encoded & 0xC0, 0xC0); // Should start with 11
+        assert_eq!(POSITIVE_ZERO_BYTE & 0xC0, 0x80); // Should start with 10
     }
 
     #[test]

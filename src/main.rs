@@ -9,28 +9,6 @@ fn format_binary(bytes: &[u8]) -> String {
 }
 
 fn main() {
-    // Debug order preservation first
-    println!("=== Order Preservation Debug ===\n");
-
-    let d1: Decimal = "-1.5".parse().unwrap();
-    let dec1 = d1.decode().unwrap();
-    println!(
-        "-1.5 parsed as: positive={}, exp_positive={}, exp={}, sig={:?}",
-        dec1.positive, dec1.exponent_positive, dec1.exponent, dec1.significand
-    );
-    println!("-1.5 encoded: {}", format_binary(d1.as_bytes()));
-
-    let d2: Decimal = "-1".parse().unwrap();
-    let dec2 = d2.decode().unwrap();
-    println!(
-        "-1 parsed as: positive={}, exp_positive={}, exp={}, sig={:?}",
-        dec2.positive, dec2.exponent_positive, dec2.exponent, dec2.significand
-    );
-    println!("-1 encoded: {}", format_binary(d2.as_bytes()));
-
-    println!("\nComparison: d1 < d2 = {}", d1 < d2);
-    println!("Expected: -1.5 < -1 means d1 should be < d2\n");
-
     println!("=== decimalInfinite Encoding Demo ===\n");
 
     // Examples from the paper
@@ -48,8 +26,8 @@ fn main() {
 
                 // Verify roundtrip
                 match Decimal::from_bytes(encoded) {
-                    Ok(_) => println!("    ✓ Roundtrip successful"),
-                    Err(e) => println!("    ✗ Decode error: {e}"),
+                    Ok(_) => println!("    Roundtrip successful"),
+                    Err(e) => println!("    Decode error: {e}"),
                 }
                 println!();
             }
@@ -80,9 +58,9 @@ fn main() {
         let (num2, dec2) = &encoded_numbers[i];
 
         if dec1 < dec2 {
-            println!("  ✓ {num1} < {num2} (lexicographic order preserved)");
+            println!("  {num1} < {num2} (lexicographic order preserved)");
         } else {
-            println!("  ✗ {num1} >= {num2} (order NOT preserved!)");
+            println!("  {num1} >= {num2} (order NOT preserved!)");
         }
     }
 
@@ -91,24 +69,10 @@ fn main() {
     let decimal: Decimal = "42.195".parse().unwrap();
     let encoded = decimal.as_bytes();
 
-    println!("Using new Decimal API:");
+    println!("Using Decimal API:");
     println!("  Value: 42.195");
     println!("  Encoded: {}", format_binary(encoded));
     println!("  as_bytes() is zero-copy (no allocation)");
-
-    // Special values
-    println!("\n=== Special Values ===\n");
-    let specials = vec![
-        ("Negative Infinity", Decimal::neg_infinity()),
-        ("Positive Zero", Decimal::zero()),
-        ("Positive Infinity", Decimal::infinity()),
-        ("NaN", Decimal::nan()),
-    ];
-
-    for (name, special) in specials {
-        let encoded = special.as_bytes();
-        println!("  {} -> {}", name, format_binary(encoded));
-    }
 
     println!("\n=== Demo Complete ===");
 }

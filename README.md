@@ -64,6 +64,9 @@ let d = Decimal::from(42u64);
 let d = Decimal::from(-7i32);
 let d = Decimal::try_from(3.14f64).unwrap();
 
+// back to integers (fallible — rejects fractions and out-of-range)
+let n: i64 = i64::try_from(&d).unwrap();
+
 // zero
 let _ = Decimal::zero();
 
@@ -76,6 +79,10 @@ All `Decimal` values are finite, non-NaN numbers. Parsing `"inf"`, `"nan"`,
 etc. returns an error, and `TryFrom<f64>` rejects NaN/Infinity.
 Negative zero (`"-0"`) is normalized to positive zero.
 
+`TryFrom<Decimal>` is implemented for all standard integer types (`i8`–`i128`,
+`u8`–`u128`), returning an error if the value has a fractional part or exceeds
+the target type's range.
+
 ## Serde
 
 Enable the `serde` feature for `Serialize` / `Deserialize`:
@@ -87,14 +94,18 @@ ordecimal = { version = "0.3", features = ["serde"] }
 Decimals serialize as their string representation in human-readable formats (JSON, TOML)
 and as raw bytes in binary formats (bincode).
 
-## `rust_decimal` integration
+## Optional integrations
 
-Enable the `rust_decimal` feature to convert between `ordecimal::Decimal` and
-[`rust_decimal::Decimal`](https://docs.rs/rust_decimal):
+Each integration is behind a feature flag:
 
 ```toml
-ordecimal = { version = "0.3", features = ["rust_decimal"] }
+ordecimal = { version = "0.3", features = ["rust_decimal", "bigdecimal", "decimal_rs", "num_bigint"] }
 ```
+
+### `rust_decimal`
+
+Convert between `ordecimal::Decimal` and [`rust_decimal::Decimal`](https://docs.rs/rust_decimal)
+(96-bit coefficient, 28-digit precision):
 
 ```rust
 use ordecimal::Decimal;
@@ -105,6 +116,50 @@ let od = Decimal::from(rd);
 
 // ordecimal → rust_decimal (fallible — rejects out-of-range values)
 let rd_back = rust_decimal::Decimal::try_from(&od).unwrap();
+```
+
+### `bigdecimal`
+
+Convert between `ordecimal::Decimal` and [`bigdecimal::BigDecimal`](https://docs.rs/bigdecimal).
+Both types support arbitrary precision, so conversions are **infallible in both directions**:
+
+```rust
+use ordecimal::Decimal;
+
+let bd = bigdecimal::BigDecimal::from(42);
+let od = Decimal::from(bd);
+let bd_back = bigdecimal::BigDecimal::from(&od);
+```
+
+### `decimal_rs`
+
+Convert between `ordecimal::Decimal` and [`decimal_rs::Decimal`](https://docs.rs/decimal-rs)
+(38-digit precision):
+
+```rust
+use ordecimal::Decimal;
+
+let dr = decimal_rs::Decimal::from(42_i64);
+let od = Decimal::from(dr);
+
+// ordecimal → decimal_rs (fallible — rejects out-of-range values)
+let dr_back = decimal_rs::Decimal::try_from(&od).unwrap();
+```
+
+### `num_bigint`
+
+Convert between `ordecimal::Decimal` and [`num_bigint::BigInt`](https://docs.rs/num-bigint) /
+`BigUint`:
+
+```rust
+use ordecimal::Decimal;
+use num_bigint::BigInt;
+
+let bi = BigInt::from(42);
+let od = Decimal::from(bi);
+
+// ordecimal → BigInt (fallible — rejects fractional values)
+let bi_back = BigInt::try_from(&od).unwrap();
 ```
 
 ## Reference

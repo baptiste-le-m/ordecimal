@@ -2,33 +2,32 @@
 //!
 //! Based on the paper "decimalInfinite: All Decimals In Bits" by Ghislain Fourny
 
-use crate::decimal::SpecialValue;
 use crate::error::{DecodeError, DecodeResult};
 use crate::gamma::BitReader;
 use crate::significand::{decode_significand, decode_significand_to_buf};
 
 /// Decoded decimal with semantic fields (for when field access is needed)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedDecimal {
+pub(crate) struct DecodedDecimal {
     pub positive: bool,
     pub exponent_positive: bool,
     pub exponent: u64,
     pub significand: Vec<u8>,
 }
 
-/// Represents either a decoded regular decimal or a special value
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodedValue {
-    Regular(DecodedDecimal),
-    Special(SpecialValue),
-}
-
-/// Decode bytes to semantic parts
+/// Decode bytes to semantic parts.
+///
+/// Returns a [`DecodedDecimal`] for regular numbers, or an error for
+/// invalid encodings (including the now-removed special value byte patterns
+/// `0x00`, `0x40`, `0xC0`, `0xE0`).
+///
+/// The only valid single-byte encoding is `0x80` (positive zero), which is
+/// handled by callers before reaching this function.
 ///
 /// # Errors
 ///
 /// Returns [`DecodeError`] if the bytes are empty or contain an invalid encoding.
-pub fn decode_to_parts(bytes: &[u8]) -> DecodeResult<DecodedValue> {
+pub(crate) fn decode_to_parts(bytes: &[u8]) -> DecodeResult<DecodedDecimal> {
     if bytes.is_empty() {
         return Err(DecodeError::UnexpectedEndOfInput);
     }
@@ -40,36 +39,26 @@ pub fn decode_to_parts(bytes: &[u8]) -> DecodeResult<DecodedValue> {
     let sign_bit2 = reader.read_bit()?;
 
     match (sign_bit1, sign_bit2) {
-        // 00 = negative or -INF
+        // 00 = negative number (was also -INF when all-zeros — now rejected)
         (false, false) => {
             if !reader.has_bits() || is_all_zeros_from_position(&reader) {
-                return Ok(DecodedValue::Special(SpecialValue::NegativeInfinity));
+                return Err(DecodeError::InvalidSpecialValue);
             }
             decode_regular(&mut reader, false)
         }
-        // 01 = negative zero
-        (false, true) => Ok(DecodedValue::Special(SpecialValue::NegativeZero)),
+        // 01 = was NegativeZero — now rejected
+        (false, true) => Err(DecodeError::InvalidSpecialValue),
         // 10 = positive zero or positive number
         (true, false) => {
             if !reader.has_bits() || is_all_zeros_from_position(&reader) {
-                return Ok(DecodedValue::Special(SpecialValue::PositiveZero));
+                // Positive zero — valid, but callers handle single-byte 0x80 directly.
+                // Multi-byte all-zeros after "10" is also positive zero (padded).
+                return Err(DecodeError::InvalidSpecialValue);
             }
             decode_regular(&mut reader, true)
         }
-        // 11 = +INF or NaN
-        (true, true) => {
-            if !reader.has_bits() {
-                return Ok(DecodedValue::Special(SpecialValue::PositiveInfinity));
-            }
-            let third_bit = reader.read_bit()?;
-            if third_bit {
-                // 111 = NaN
-                Ok(DecodedValue::Special(SpecialValue::NaN))
-            } else {
-                // 110 = +INF
-                Ok(DecodedValue::Special(SpecialValue::PositiveInfinity))
-            }
-        }
+        // 11 = was +INF or NaN — now rejected
+        (true, true) => Err(DecodeError::InvalidSpecialValue),
     }
 }
 
@@ -84,11 +73,12 @@ pub(crate) struct DecodedParts {
 
 /// Decode bytes into [`DecodedParts`], writing significand digits into `sig_buf`.
 ///
-/// Returns `Ok(Ok(parts))` for regular numbers, `Ok(Err(special))` for special values.
-pub(crate) fn decode_to_buf(
-    bytes: &[u8],
-    sig_buf: &mut [u8],
-) -> DecodeResult<Result<DecodedParts, SpecialValue>> {
+/// Returns `Ok(parts)` for regular numbers.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for invalid encodings, including removed special value patterns.
+pub(crate) fn decode_to_buf(bytes: &[u8], sig_buf: &mut [u8]) -> DecodeResult<DecodedParts> {
     if bytes.is_empty() {
         return Err(DecodeError::UnexpectedEndOfInput);
     }
@@ -100,28 +90,18 @@ pub(crate) fn decode_to_buf(
     match (sign_bit1, sign_bit2) {
         (false, false) => {
             if !reader.has_bits() || is_all_zeros_from_position(&reader) {
-                return Ok(Err(SpecialValue::NegativeInfinity));
+                return Err(DecodeError::InvalidSpecialValue);
             }
-            decode_regular_to_buf(&mut reader, false, sig_buf).map(Ok)
+            decode_regular_to_buf(&mut reader, false, sig_buf)
         }
-        (false, true) => Ok(Err(SpecialValue::NegativeZero)),
+        (false, true) => Err(DecodeError::InvalidSpecialValue),
         (true, false) => {
             if !reader.has_bits() || is_all_zeros_from_position(&reader) {
-                return Ok(Err(SpecialValue::PositiveZero));
+                return Err(DecodeError::InvalidSpecialValue);
             }
-            decode_regular_to_buf(&mut reader, true, sig_buf).map(Ok)
+            decode_regular_to_buf(&mut reader, true, sig_buf)
         }
-        (true, true) => {
-            if !reader.has_bits() {
-                return Ok(Err(SpecialValue::PositiveInfinity));
-            }
-            let third_bit = reader.read_bit()?;
-            if third_bit {
-                Ok(Err(SpecialValue::NaN))
-            } else {
-                Ok(Err(SpecialValue::PositiveInfinity))
-            }
-        }
+        (true, true) => Err(DecodeError::InvalidSpecialValue),
     }
 }
 
@@ -199,7 +179,7 @@ fn is_all_zeros_from_position(reader: &BitReader) -> bool {
 }
 
 /// Decode a regular (non-special) decimal number
-fn decode_regular(reader: &mut BitReader, positive: bool) -> DecodeResult<DecodedValue> {
+fn decode_regular(reader: &mut BitReader, positive: bool) -> DecodeResult<DecodedDecimal> {
     // TE: Read exponent sign and exponent together
     // First, read the leading bit to determine if gamma is negated
     let first_bit = reader.read_bit()?;
@@ -287,7 +267,7 @@ fn decode_regular(reader: &mut BitReader, positive: bool) -> DecodeResult<Decode
         significand,
     };
 
-    Ok(DecodedValue::Regular(decoded))
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -296,20 +276,35 @@ mod tests {
     use crate::encoder::encode_from_parts;
 
     #[test]
-    fn test_decode_zero() {
+    fn test_decode_zero_bytes_rejected() {
+        // 0x80 (positive zero) is now handled by the caller, not the decoder.
+        // Single byte 0x80 has sign bits "10" and then all zeros → InvalidSpecialValue
         let bytes = vec![0b1000_0000]; // 10
-        let decoded = decode_to_parts(&bytes).unwrap();
-        assert_eq!(decoded, DecodedValue::Special(SpecialValue::PositiveZero));
+        assert!(decode_to_parts(&bytes).is_err());
     }
 
     #[test]
-    fn test_decode_negative_infinity() {
+    fn test_decode_negative_infinity_rejected() {
         let bytes = vec![0b0000_0000]; // 00
-        let decoded = decode_to_parts(&bytes).unwrap();
-        assert_eq!(
-            decoded,
-            DecodedValue::Special(SpecialValue::NegativeInfinity)
-        );
+        assert!(decode_to_parts(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_decode_negative_zero_rejected() {
+        let bytes = vec![0b0100_0000]; // 01
+        assert!(decode_to_parts(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_decode_positive_infinity_rejected() {
+        let bytes = vec![0b1100_0000]; // 11
+        assert!(decode_to_parts(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_decode_nan_rejected() {
+        let bytes = vec![0b1110_0000]; // 111
+        assert!(decode_to_parts(&bytes).is_err());
     }
 
     #[test]
@@ -318,15 +313,11 @@ mod tests {
         let encoded = encode_from_parts(true, false, 1, &[7, 0, 7, 1, 0, 6]);
         let decoded = decode_to_parts(&encoded).unwrap();
 
-        if let DecodedValue::Regular(dec) = decoded {
-            assert!(dec.positive);
-            assert!(!dec.exponent_positive);
-            assert_eq!(dec.exponent, 1);
-            // Significand may have trailing zeros from padding
-            assert!(dec.significand.starts_with(&[7, 0, 7, 1, 0, 6]));
-        } else {
-            panic!("Expected regular decimal");
-        }
+        assert!(decoded.positive);
+        assert!(!decoded.exponent_positive);
+        assert_eq!(decoded.exponent, 1);
+        // Significand may have trailing zeros from padding
+        assert!(decoded.significand.starts_with(&[7, 0, 7, 1, 0, 6]));
     }
 
     #[test]
@@ -336,13 +327,9 @@ mod tests {
         println!("Encoded 1: {:08b}", encoded[0]);
         let decoded = decode_to_parts(&encoded).unwrap();
 
-        if let DecodedValue::Regular(dec) = decoded {
-            assert!(dec.positive);
-            assert!(dec.exponent_positive);
-            assert_eq!(dec.exponent, 0);
-            assert_eq!(dec.significand[0], 1);
-        } else {
-            panic!("Expected regular decimal");
-        }
+        assert!(decoded.positive);
+        assert!(decoded.exponent_positive);
+        assert_eq!(decoded.exponent, 0);
+        assert_eq!(decoded.significand[0], 1);
     }
 }

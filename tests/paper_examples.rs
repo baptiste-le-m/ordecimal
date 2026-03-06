@@ -170,33 +170,7 @@ fn test_roundtrip_paper_examples() {
         let encoded = original.as_bytes();
         let decoded = Decimal::from_bytes(encoded).unwrap();
 
-        let orig_decoded = original.decode().unwrap();
-        let dec_decoded = decoded.decode().unwrap();
-
-        assert_eq!(
-            orig_decoded.positive, dec_decoded.positive,
-            "Sign mismatch for {}",
-            case
-        );
-        assert_eq!(
-            orig_decoded.exponent_positive, dec_decoded.exponent_positive,
-            "Exp sign mismatch for {}",
-            case
-        );
-        assert_eq!(
-            orig_decoded.exponent, dec_decoded.exponent,
-            "Exponent mismatch for {}",
-            case
-        );
-        assert!(
-            dec_decoded
-                .significand
-                .starts_with(&orig_decoded.significand),
-            "Significand mismatch for {}: {:?} vs {:?}",
-            case,
-            orig_decoded.significand,
-            dec_decoded.significand
-        );
+        assert_eq!(original, decoded, "Roundtrip mismatch for {}", case);
     }
 }
 
@@ -232,52 +206,8 @@ fn test_order_preservation_detailed() {
 }
 
 // =============================================================================
-// Special values (Figure 11)
+// Zero encoding
 // =============================================================================
-
-#[test]
-fn test_special_values_encoding() {
-    // Figure 11 of the paper
-    assert_eq!(
-        Decimal::neg_infinity().as_bytes(),
-        &[0b0000_0000],
-        "-INF should be 00"
-    );
-    assert_eq!(
-        Decimal::zero().as_bytes(),
-        &[0b1000_0000],
-        "+0 should be 10"
-    );
-    assert_eq!(
-        Decimal::infinity().as_bytes(),
-        &[0b1100_0000],
-        "+INF should be 11"
-    );
-    assert_eq!(
-        Decimal::nan().as_bytes(),
-        &[0b1110_0000],
-        "NaN should be 111"
-    );
-}
-
-#[test]
-fn test_special_values_ordering() {
-    let neg_inf = Decimal::neg_infinity();
-    let zero = Decimal::zero();
-    let pos_inf = Decimal::infinity();
-
-    assert!(neg_inf < zero);
-    assert!(zero < pos_inf);
-    assert!(neg_inf < pos_inf);
-
-    // Regular numbers between specials
-    let neg1: Decimal = "-1".parse().unwrap();
-    let pos1: Decimal = "1".parse().unwrap();
-    assert!(neg_inf < neg1);
-    assert!(neg1 < zero);
-    assert!(zero < pos1);
-    assert!(pos1 < pos_inf);
-}
 
 #[test]
 fn test_zero_encoding() {

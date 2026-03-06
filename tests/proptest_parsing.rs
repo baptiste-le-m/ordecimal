@@ -48,13 +48,9 @@ fn arb_valid_decimal() -> impl Strategy<Value = (String, Decimal)> {
     })
 }
 
-/// Generate two valid decimals that are both finite (not NaN/Inf) so we can
-/// meaningfully compare their numeric ordering.
-fn arb_finite_decimal_pair() -> impl Strategy<Value = ((String, Decimal), (String, Decimal))> {
+/// Generate two valid decimals for comparison.
+fn arb_decimal_pair() -> impl Strategy<Value = ((String, Decimal), (String, Decimal))> {
     (arb_valid_decimal(), arb_valid_decimal())
-        .prop_filter("both must be finite", |((_sa, a), (_sb, b))| {
-            a.is_finite() && b.is_finite()
-        })
 }
 
 // ---------------------------------------------------------------------------
@@ -135,25 +131,27 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Property 5: From<f64> roundtrip via to_plain_string
+// Property 5: TryFrom<f64> roundtrip via to_plain_string
 // ---------------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
 
     #[test]
-    fn from_f64_roundtrips(x: f64) {
-        let d = Decimal::from(x);
-        let plain = d.to_plain_string();
-        let reparsed: Decimal = plain.parse()
-            .expect("to_plain_string of From<f64> must be re-parseable");
-        prop_assert_eq!(
-            d.as_bytes(),
-            reparsed.as_bytes(),
-            "roundtrip mismatch for f64 {}: plain={:?}",
-            x,
-            plain,
-        );
+    fn try_from_f64_roundtrips(x: f64) {
+        // TryFrom rejects NaN/Infinity, so filter to Ok values
+        if let Ok(d) = Decimal::try_from(x) {
+            let plain = d.to_plain_string();
+            let reparsed: Decimal = plain.parse()
+                .expect("to_plain_string of TryFrom<f64> must be re-parseable");
+            prop_assert_eq!(
+                d.as_bytes(),
+                reparsed.as_bytes(),
+                "roundtrip mismatch for f64 {}: plain={:?}",
+                x,
+                plain,
+            );
+        }
     }
 }
 
@@ -182,14 +180,13 @@ proptest! {
 
     #[test]
     fn order_preserved_for_f64(a: f64, b: f64) {
-        // Only test finite, non-NaN values where f64 total_cmp is meaningful
-        // and maps cleanly to Decimal ordering.
+        // Only test finite, non-NaN values where f64 ordering is meaningful
         prop_assume!(a.is_finite() && b.is_finite() && !a.is_nan() && !b.is_nan());
-        // Skip -0 vs +0 edge case (Decimal treats them as equal)
+        // Skip -0 vs +0 edge case (both map to positive zero in Decimal)
         prop_assume!(!(a == 0.0 && b == 0.0));
 
-        let da = Decimal::from(a);
-        let db = Decimal::from(b);
+        let da = Decimal::try_from(a).unwrap();
+        let db = Decimal::try_from(b).unwrap();
 
         let expected = a.partial_cmp(&b).unwrap();
         prop_assert_eq!(
@@ -210,7 +207,7 @@ proptest! {
 
     #[test]
     fn eq_implies_same_hash(
-        ((_sa, a), (_sb, b)) in arb_finite_decimal_pair()
+        ((_sa, a), (_sb, b)) in arb_decimal_pair()
     ) {
         if a == b {
             let hash_a = {

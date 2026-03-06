@@ -100,6 +100,26 @@ ordecimal = { version = "0.2", features = ["serde"] }
 Decimals serialize as their string representation in human-readable formats (JSON, TOML)
 and as raw bytes in binary formats (bincode).
 
+## `rust_decimal` integration
+
+Enable the `rust_decimal` feature to convert between `ordecimal::Decimal` and
+[`rust_decimal::Decimal`](https://docs.rs/rust_decimal):
+
+```toml
+ordecimal = { version = "0.2", features = ["rust_decimal"] }
+```
+
+```rust
+use ordecimal::Decimal;
+
+// rust_decimal → ordecimal (infallible)
+let rd = rust_decimal::Decimal::new(123_456, 3); // 123.456
+let od = Decimal::from(rd);
+
+// ordecimal → rust_decimal (fallible — rejects infinity, NaN, and out-of-range values)
+let rd_back = rust_decimal::Decimal::try_from(&od).unwrap();
+```
+
 ## Reference
 
 > Ghislain Fourny. "decimalInfinite — All Decimals In Bits. No Loss. Same Order. Simple."

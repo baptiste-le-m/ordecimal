@@ -9,6 +9,7 @@
 //!   because ordecimal values can have fractional parts (and `BigUint` rejects
 //!   negative values).
 
+use crate::decoder::decode_to_parts;
 use crate::Decimal;
 use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
@@ -85,14 +86,50 @@ impl TryFrom<&Decimal> for BigInt {
     type Error = BigIntConversionError;
 
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
-        let s = value.to_plain_string();
-
-        if s.contains('.') {
-            return Err(BigIntConversionError::NotAnInteger(s));
+        if value.is_zero() {
+            return Ok(BigInt::from(0));
         }
 
-        s.parse::<BigInt>()
-            .map_err(|_| BigIntConversionError::NotAnInteger(s))
+        let decoded = decode_to_parts(value.as_bytes())
+            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))?;
+
+        // Trim trailing zeros from the significand to get meaningful digits.
+        let sig = match decoded.significand.iter().rposition(|&d| d != 0) {
+            Some(pos) => &decoded.significand[..=pos],
+            None => &decoded.significand[..1], // at least one digit
+        };
+
+        // Determine whether the value is an integer.
+        // With a positive (or zero) exponent, the number of integer digits
+        // is `exponent + 1`.  If that covers all significand digits the
+        // value is an integer; the remaining positions are trailing zeros.
+        // With a negative exponent the value is < 1, always fractional.
+        if !decoded.exponent_positive && decoded.exponent > 0 {
+            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
+        }
+
+        let int_digits = decoded.exponent as usize + 1;
+        if int_digits < sig.len() {
+            // Some significand digits fall after the decimal point → fractional.
+            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
+        }
+
+        // Build the full digit string: significand digits + trailing zeros.
+        let trailing_zeros = int_digits - sig.len();
+        let mut digit_string = String::with_capacity(int_digits + 1);
+        if !decoded.positive {
+            digit_string.push('-');
+        }
+        for &d in sig {
+            digit_string.push((d + b'0') as char);
+        }
+        for _ in 0..trailing_zeros {
+            digit_string.push('0');
+        }
+
+        digit_string
+            .parse::<BigInt>()
+            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))
     }
 }
 
@@ -112,18 +149,46 @@ impl TryFrom<&Decimal> for BigUint {
     type Error = BigIntConversionError;
 
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
-        let s = value.to_plain_string();
-
-        if s.contains('.') {
-            return Err(BigIntConversionError::NotAnInteger(s));
+        if value.is_zero() {
+            return Ok(BigUint::from(0_u64));
         }
 
-        if s.starts_with('-') {
-            return Err(BigIntConversionError::Negative(s));
+        let decoded = decode_to_parts(value.as_bytes())
+            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))?;
+
+        if !decoded.positive {
+            return Err(BigIntConversionError::Negative(value.to_plain_string()));
         }
 
-        s.parse::<BigUint>()
-            .map_err(|_| BigIntConversionError::NotAnInteger(s))
+        // Trim trailing zeros from the significand to get meaningful digits.
+        let sig = match decoded.significand.iter().rposition(|&d| d != 0) {
+            Some(pos) => &decoded.significand[..=pos],
+            None => &decoded.significand[..1],
+        };
+
+        // With a negative exponent the value is < 1, always fractional.
+        if !decoded.exponent_positive && decoded.exponent > 0 {
+            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
+        }
+
+        let int_digits = decoded.exponent as usize + 1;
+        if int_digits < sig.len() {
+            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
+        }
+
+        // Build the full digit string: significand digits + trailing zeros.
+        let trailing_zeros = int_digits - sig.len();
+        let mut digit_string = String::with_capacity(int_digits);
+        for &d in sig {
+            digit_string.push((d + b'0') as char);
+        }
+        for _ in 0..trailing_zeros {
+            digit_string.push('0');
+        }
+
+        digit_string
+            .parse::<BigUint>()
+            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))
     }
 }
 
@@ -240,6 +305,35 @@ mod tests {
         assert_eq!(bi, BigInt::from_str(s).unwrap());
     }
 
+    #[test]
+    fn try_into_bigint_extreme_exponent() {
+        // Exponent > MAX_PLAIN_EXPONENT (1000): to_plain_string() would return
+        // scientific notation, but decode_to_parts avoids that entirely.
+        let od: Decimal = "1e5000".parse().unwrap();
+        let bi = BigInt::try_from(&od).unwrap();
+        let expected = BigInt::from(10_u64).pow(5000);
+        assert_eq!(bi, expected);
+    }
+
+    #[test]
+    fn try_into_bigint_negative_extreme_exponent() {
+        let od: Decimal = "-1e5000".parse().unwrap();
+        let bi = BigInt::try_from(&od).unwrap();
+        let expected = -BigInt::from(10_u64).pow(5000);
+        assert_eq!(bi, expected);
+    }
+
+    #[test]
+    fn try_into_bigint_extreme_negative_exponent_fractional_rejected() {
+        // Negative extreme exponent: value is < 1, always fractional.
+        let od: Decimal = "1.5e-5000".parse().unwrap();
+        let result = BigInt::try_from(&od);
+        assert!(matches!(
+            result,
+            Err(BigIntConversionError::NotAnInteger(_))
+        ));
+    }
+
     // ── TryFrom<Decimal> for BigUint ───────────────────────────────────
 
     #[test]
@@ -273,6 +367,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn try_into_biguint_extreme_exponent() {
+        let od: Decimal = "1e5000".parse().unwrap();
+        let bu = BigUint::try_from(&od).unwrap();
+        let expected = BigUint::from(10_u64).pow(5000);
+        assert_eq!(bu, expected);
+    }
+
+    #[test]
+    fn try_into_biguint_negative_extreme_exponent_rejected() {
+        let od: Decimal = "-1e5000".parse().unwrap();
+        let result = BigUint::try_from(&od);
+        assert!(matches!(result, Err(BigIntConversionError::Negative(_))));
+    }
+
     // ── Roundtrip ──────────────────────────────────────────────────────
 
     #[test]
@@ -294,6 +403,15 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_bigint_extreme_exponent() {
+        // 10^2000 roundtrips through ordecimal → BigInt.
+        let bi_original = BigInt::from(10_u64).pow(2000);
+        let od = Decimal::from(&bi_original);
+        let bi_restored = BigInt::try_from(&od).unwrap();
+        assert_eq!(bi_original, bi_restored);
+    }
+
+    #[test]
     fn roundtrip_biguint() {
         let values = ["0", "1", "42", "999999999999999999999999999999"];
         for s in &values {
@@ -302,6 +420,14 @@ mod tests {
             let bu_restored = BigUint::try_from(&od).unwrap();
             assert_eq!(bu_original, bu_restored, "roundtrip failed for {s}");
         }
+    }
+
+    #[test]
+    fn roundtrip_biguint_extreme_exponent() {
+        let bu_original = BigUint::from(10_u64).pow(2000);
+        let od = Decimal::from(&bu_original);
+        let bu_restored = BigUint::try_from(&od).unwrap();
+        assert_eq!(bu_original, bu_restored);
     }
 
     // ── Order preservation ─────────────────────────────────────────────

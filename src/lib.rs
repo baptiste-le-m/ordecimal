@@ -46,11 +46,18 @@
 //! - **E** (variable): Exponent using modified Elias Gamma code
 //! - **M** (variable): Significand using tetrades (4 bits) and declets (10 bits per 3 digits)
 
+#[cfg(feature = "bigdecimal")]
+mod bigdecimal_impl;
 pub(crate) mod decimal;
+#[cfg(feature = "decimal_rs")]
+mod decimal_rs_impl;
 pub(crate) mod decoder;
 pub(crate) mod encoder;
 pub(crate) mod error;
 pub(crate) mod gamma;
+mod integer_impl;
+#[cfg(feature = "num_bigint")]
+mod num_bigint_impl;
 #[cfg(feature = "rust_decimal")]
 mod rust_decimal_impl;
 #[cfg(feature = "serde")]
@@ -58,8 +65,15 @@ mod serde_impl;
 pub(crate) mod significand;
 
 // Re-export main types and functions
+// bigdecimal_impl has no public items to re-export — it only provides
+// trait impls (From<BigDecimal> / From<Decimal>).
 pub use decimal::Decimal;
+#[cfg(feature = "decimal_rs")]
+pub use decimal_rs_impl::DecimalRsConversionError;
 pub use error::{DecodeError, DecodeResult, EncodeError, EncodeResult};
+pub use integer_impl::IntegerConversionError;
+#[cfg(feature = "num_bigint")]
+pub use num_bigint_impl::BigIntConversionError;
 #[cfg(feature = "rust_decimal")]
 pub use rust_decimal_impl::RustDecimalConversionError;
 

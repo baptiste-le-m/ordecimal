@@ -29,7 +29,7 @@ pub enum DecodeError {
     #[error("Buffer too short: need at least {expected} bits, got {actual}")]
     BufferTooShort { expected: usize, actual: usize },
 
-    #[error("Invalid special value encoding")]
+    #[error("Invalid encoding: byte pattern represents a removed special value (±∞, NaN, or −0)")]
     InvalidSpecialValue,
 }
 

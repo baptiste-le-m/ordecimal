@@ -41,7 +41,7 @@
 //!
 //! The encoding uses a STEM format (Sign, exponent sign (T), Exponent, Mantissa/significand):
 //!
-//! - **S** (2 bits): Overall sign (00=negative, 10=positive, also handles special values)
+//! - **S** (2 bits): Overall sign (00=negative, 10=positive)
 //! - **T** (1 bit): Exponent sign
 //! - **E** (variable): Exponent using modified Elias Gamma code
 //! - **M** (variable): Significand using tetrades (4 bits) and declets (10 bits per 3 digits)
@@ -58,8 +58,7 @@ mod serde_impl;
 pub(crate) mod significand;
 
 // Re-export main types and functions
-pub use decimal::{Decimal, SpecialValue};
-pub use decoder::DecodedDecimal;
+pub use decimal::Decimal;
 pub use error::{DecodeError, DecodeResult, EncodeError, EncodeResult};
 #[cfg(feature = "rust_decimal")]
 pub use rust_decimal_impl::RustDecimalConversionError;
@@ -98,19 +97,11 @@ mod tests {
     }
 
     #[test]
-    fn test_special_values() {
-        let special_values = vec![
-            (Decimal::neg_infinity(), "negative infinity"),
-            (Decimal::zero(), "zero"),
-            (Decimal::infinity(), "positive infinity"),
-            (Decimal::nan(), "NaN"),
-        ];
-
-        for (decimal, _name) in special_values {
-            let encoded = decimal.as_bytes();
-            let decoded = Decimal::from_bytes(encoded).unwrap();
-            assert_eq!(decimal, decoded);
-        }
+    fn test_zero() {
+        let zero = Decimal::zero();
+        let encoded = zero.as_bytes();
+        let decoded = Decimal::from_bytes(encoded).unwrap();
+        assert_eq!(zero, decoded);
     }
 
     #[test]

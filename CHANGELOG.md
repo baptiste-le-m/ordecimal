@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- **Removed special values**: `Decimal::infinity()`, `neg_infinity()`, `nan()` constructors removed; `SpecialValue` enum removed entirely
+- **Removed predicates**: `is_nan()`, `is_infinity()`, `is_pos_infinity()`, `is_neg_infinity()`, `is_finite()` removed — all values are now finite non-NaN
+- **Removed `decode()` method**: use `to_plain_string()` or `to_scientific_string()` to inspect values
+- **Removed public `DecodedDecimal`**: decoder types are now `pub(crate)` only
+- **`From<f64>` → `TryFrom<f64>`**: rejects NaN and Infinity with `EncodeError`; same for `f32`
+- **`FromStr` rejects `"inf"`, `"nan"` etc.**: returns `EncodeError::InvalidFormat`
+- **`"-0"` normalizes to positive zero**: parsing `-0` no longer creates a distinct negative zero
+- **`from_bytes` rejects old special-value bytes**: `0x00` (−∞), `0x40` (−0), `0xC0` (+∞), `0xE0` (NaN) now return `DecodeError::InvalidSpecialValue` — **data-breaking** for stored bytes
+- **Simplified `PartialEq`/`Ord`/`Hash`**: direct byte comparison with no +0/−0 normalization (no longer needed)
+- **`RustDecimalConversionError::UnsupportedSpecialValue` removed**: only `OutOfRange` remains
+
+### Rationale
+
+Special values (±∞, NaN, −0) added complexity to every code path and are not needed for the primary use case (database sort keys for finite decimal numbers). Removing them simplifies the API, reduces code size, and eliminates edge cases in ordering and hashing.
+
 ## 0.2.0
 
 ### Features

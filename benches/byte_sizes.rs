@@ -166,30 +166,12 @@ fn main() {
     let d1000 = make_large_decimal(1000);
     add_str("1000 digits", &d1000);
 
-    // Special values
+    // Zero
     rows.push(Row {
         input: "zero".to_string(),
         ordecimal_bytes: Decimal::zero().as_bytes().len(),
         decimal_bytes_bytes: DbDecimal::from_str("0").unwrap().as_bytes().len(),
         memcomparable_result: McResult::Ok(McDecimal::ZERO.to_vec().unwrap().len()),
-    });
-    rows.push(Row {
-        input: "+infinity".to_string(),
-        ordecimal_bytes: Decimal::infinity().as_bytes().len(),
-        decimal_bytes_bytes: DbDecimal::infinity().as_bytes().len(),
-        memcomparable_result: McResult::Ok(McDecimal::Inf.to_vec().unwrap().len()),
-    });
-    rows.push(Row {
-        input: "-infinity".to_string(),
-        ordecimal_bytes: Decimal::neg_infinity().as_bytes().len(),
-        decimal_bytes_bytes: DbDecimal::neg_infinity().as_bytes().len(),
-        memcomparable_result: McResult::Ok(McDecimal::NegInf.to_vec().unwrap().len()),
-    });
-    rows.push(Row {
-        input: "NaN".to_string(),
-        ordecimal_bytes: Decimal::nan().as_bytes().len(),
-        decimal_bytes_bytes: DbDecimal::nan().as_bytes().len(),
-        memcomparable_result: McResult::Ok(McDecimal::NaN.to_vec().unwrap().len()),
     });
 
     // Print

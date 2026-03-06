@@ -1,5 +1,5 @@
-use crate::decoder::{decode_to_buf, decode_to_parts, DecodedDecimal, DecodedParts, DecodedValue};
-use crate::encoder::{encode_from_parts, encode_special_byte};
+use crate::decoder::{decode_to_buf, decode_to_parts, DecodedParts};
+use crate::encoder::{encode_from_parts, POSITIVE_ZERO_BYTE};
 use crate::error::{DecodeError, EncodeError, EncodeResult};
 use std::cmp::Ordering;
 use std::fmt;
@@ -7,36 +7,16 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-/// Special decimal values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpecialValue {
-    NegativeInfinity,
-    NegativeZero,
-    PositiveZero,
-    PositiveInfinity,
-    NaN,
-}
-
-/// Represents a decimal number in pre-encoded STEM format
+/// Represents a decimal number in pre-encoded STEM format.
 ///
 /// This struct stores the decimal as encoded bytes, providing:
 /// - Zero-copy access via `as_bytes()`
 /// - Direct byte comparison for Ord (order-preserving)
 /// - Smaller memory footprint than storing semantic fields
 ///
-/// To access semantic fields (sign, exponent, significand), use `decode()`.
-///
-/// # NaN semantics
-///
-/// Unlike IEEE 754 floating-point, [`Decimal`] treats NaN as a concrete value:
-/// - `NaN == NaN` is **true** (reflexive equality)
-/// - NaN has a defined sort position: it is **greater than** all other values,
-///   including positive infinity
-///
-/// This is intentional for use as database sort keys, where
-/// every value must have a deterministic, total ordering. Code that expects
-/// IEEE 754 NaN behavior (`NaN != NaN`, unordered comparisons) should not
-/// rely on [`Decimal`]'s [`Eq`] and [`Ord`] implementations for NaN values.
+/// All values are finite, non-NaN decimals.  Special values (±∞, NaN, −0)
+/// are **not** representable; attempts to create them via parsing or
+/// conversion return an error.
 #[derive(Debug, Clone)]
 pub struct Decimal {
     bytes: Vec<u8>,
@@ -49,12 +29,20 @@ impl Decimal {
         Self { bytes }
     }
 
-    /// Create from pre-encoded bytes with validation
+    /// Create from pre-encoded bytes with validation.
     ///
     /// # Errors
     ///
     /// Returns [`DecodeError`] if the bytes do not represent a valid encoding.
+    /// Byte patterns that previously encoded special values (±∞, NaN, −0) are
+    /// now rejected.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        // Single-byte 0x80 is positive zero — the only valid single-byte encoding.
+        if bytes == [POSITIVE_ZERO_BYTE] {
+            return Ok(Self {
+                bytes: bytes.to_vec(),
+            });
+        }
         // Validate by attempting to decode
         decode_to_parts(bytes)?;
         Ok(Self {
@@ -74,85 +62,17 @@ impl Decimal {
         self.bytes
     }
 
-    /// Decode to get semantic fields (positive, exponent, significand).
-    ///
-    /// Returns `None` for special values (±0, ±∞, NaN) since they have no
-    /// exponent or significand. Use [`is_zero()`](Self::is_zero),
-    /// [`is_nan()`](Self::is_nan), and [`is_infinity()`](Self::is_infinity)
-    /// to identify special values before decoding.
-    #[must_use]
-    pub fn decode(&self) -> Option<DecodedDecimal> {
-        match decode_to_parts(&self.bytes).ok()? {
-            DecodedValue::Regular(d) => Some(d),
-            DecodedValue::Special(_) => None,
-        }
-    }
-
-    /// Check if this is zero (either +0 or -0)
+    /// Check if this is zero
     #[must_use]
     pub fn is_zero(&self) -> bool {
-        self.bytes.len() == 1 && (self.bytes[0] == 0x80 || self.bytes[0] == 0x40)
-    }
-
-    /// Check if this is NaN
-    #[must_use]
-    pub fn is_nan(&self) -> bool {
-        self.bytes.len() == 1 && self.bytes[0] == 0b1110_0000
-    }
-
-    /// Check if this is infinity (either + or -)
-    #[must_use]
-    pub fn is_infinity(&self) -> bool {
-        self.is_pos_infinity() || self.is_neg_infinity()
-    }
-
-    /// Check if this is positive infinity
-    #[must_use]
-    pub fn is_pos_infinity(&self) -> bool {
-        self.bytes.len() == 1 && self.bytes[0] == 0xC0
-    }
-
-    /// Check if this is negative infinity
-    #[must_use]
-    pub fn is_neg_infinity(&self) -> bool {
-        self.bytes.len() == 1 && self.bytes[0] == 0x00
-    }
-
-    /// Check if this is a finite number (not infinity or NaN)
-    #[must_use]
-    pub fn is_finite(&self) -> bool {
-        !self.is_infinity() && !self.is_nan()
-    }
-
-    /// Create positive infinity
-    #[must_use]
-    pub fn infinity() -> Self {
-        Self {
-            bytes: vec![encode_special_byte(SpecialValue::PositiveInfinity)],
-        }
-    }
-
-    /// Create negative infinity
-    #[must_use]
-    pub fn neg_infinity() -> Self {
-        Self {
-            bytes: vec![encode_special_byte(SpecialValue::NegativeInfinity)],
-        }
-    }
-
-    /// Create NaN
-    #[must_use]
-    pub fn nan() -> Self {
-        Self {
-            bytes: vec![encode_special_byte(SpecialValue::NaN)],
-        }
+        self.bytes.len() == 1 && self.bytes[0] == POSITIVE_ZERO_BYTE
     }
 
     /// Create zero (positive zero)
     #[must_use]
     pub fn zero() -> Self {
         Self {
-            bytes: vec![encode_special_byte(SpecialValue::PositiveZero)],
+            bytes: vec![POSITIVE_ZERO_BYTE],
         }
     }
 
@@ -161,19 +81,18 @@ impl Decimal {
     fn parse_and_encode(s: &str) -> EncodeResult<Self> {
         let s = s.trim();
 
-        // Handle special values (case-insensitive without allocation)
+        // Reject special value strings
         if s.eq_ignore_ascii_case("inf")
             || s.eq_ignore_ascii_case("+inf")
             || s.eq_ignore_ascii_case("infinity")
             || s.eq_ignore_ascii_case("+infinity")
+            || s.eq_ignore_ascii_case("-inf")
+            || s.eq_ignore_ascii_case("-infinity")
+            || s.eq_ignore_ascii_case("nan")
         {
-            return Ok(Self::infinity());
-        }
-        if s.eq_ignore_ascii_case("-inf") || s.eq_ignore_ascii_case("-infinity") {
-            return Ok(Self::neg_infinity());
-        }
-        if s.eq_ignore_ascii_case("nan") {
-            return Ok(Self::nan());
+            return Err(EncodeError::InvalidFormat(
+                "special values (infinity, NaN) are not supported".to_string(),
+            ));
         }
 
         // Check for negative
@@ -213,18 +132,12 @@ impl Decimal {
                 (s, 0)
             };
 
-        // Handle zero
+        // Handle zero — map both +0 and -0 to positive zero
         if coeff_str == "0"
             || coeff_str == "0.0"
             || coeff_str.bytes().all(|b| b == b'0' || b == b'.')
         {
-            return if positive {
-                Ok(Self::zero())
-            } else {
-                Ok(Self {
-                    bytes: vec![encode_special_byte(SpecialValue::NegativeZero)],
-                })
-            };
+            return Ok(Self::zero());
         }
 
         // Parse the coefficient - split without allocation
@@ -269,13 +182,8 @@ impl Decimal {
 
         let significant_len = total_len - leading_zeros - trailing_zeros;
         if significant_len == 0 {
-            return if positive {
-                Ok(Self::zero())
-            } else {
-                Ok(Self {
-                    bytes: vec![encode_special_byte(SpecialValue::NegativeZero)],
-                })
-            };
+            // All digits were zero — map to positive zero regardless of sign
+            return Ok(Self::zero());
         }
 
         // Calculate the raw exponent from the position of the decimal point
@@ -357,23 +265,16 @@ impl Decimal {
     /// method falls back to scientific notation (`"1e100200000000"`) to
     /// prevent unbounded memory allocation.
     pub fn to_plain_string(&self) -> String {
-        // Fast path: special values (single byte)
-        if self.bytes.len() == 1 {
-            return match self.bytes[0] {
-                0x00 => "-inf".to_string(),
-                0x40 => "-0".to_string(),
-                0x80 => "0".to_string(),
-                0xC0 => "inf".to_string(),
-                0xE0 => "nan".to_string(),
-                _ => "<invalid>".to_string(),
-            };
+        // Fast path: zero (single byte)
+        if self.is_zero() {
+            return "0".to_string();
         }
 
         // Try decoding to a stack buffer first (no heap allocation for ≤1536
         // significant digits, which covers all practical use cases).
         let mut sig_buf = [0u8; 1536];
         match decode_to_buf(&self.bytes, &mut sig_buf) {
-            Ok(Ok(parts)) => {
+            Ok(parts) => {
                 let sig_end = sig_buf[..parts.sig_len]
                     .iter()
                     .rposition(|&x| x != 0)
@@ -385,14 +286,6 @@ impl Decimal {
                 let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
                 Self::format_plain_or_scientific(sig, &parts)
             }
-            Ok(Err(s)) => match s {
-                SpecialValue::NegativeInfinity => "-inf",
-                SpecialValue::NegativeZero => "-0",
-                SpecialValue::PositiveZero => "0",
-                SpecialValue::PositiveInfinity => "inf",
-                SpecialValue::NaN => "nan",
-            }
-            .to_string(),
             // Stack buffer too small — fall back to heap-based decode
             Err(_) => self.to_plain_string_heap(),
         }
@@ -402,8 +295,7 @@ impl Decimal {
     /// the 1536-byte stack buffer.
     fn to_plain_string_heap(&self) -> String {
         let decoded = match decode_to_parts(&self.bytes) {
-            Ok(DecodedValue::Regular(d)) => d,
-            Ok(DecodedValue::Special(_)) => unreachable!("specials handled before this path"),
+            Ok(d) => d,
             Err(_) => return "<invalid>".to_string(),
         };
 
@@ -481,25 +373,15 @@ impl Decimal {
     ///
     /// Unlike [`to_plain_string`](Self::to_plain_string), this method **always**
     /// uses `e`-notation, regardless of exponent magnitude. Zero is returned
-    /// as `"0e0"` (or `"-0e0"`). Non-numeric special values are returned as
-    /// `"inf"`, `"-inf"`, or `"nan"` (no `e`-notation since they have no
-    /// exponent).
+    /// as `"0e0"`.
     pub fn to_scientific_string(&self) -> String {
-        // Fast path: special values (single byte)
-        if self.bytes.len() == 1 {
-            return match self.bytes[0] {
-                0x00 => "-inf".to_string(),
-                0x40 => "-0e0".to_string(),
-                0x80 => "0e0".to_string(),
-                0xC0 => "inf".to_string(),
-                0xE0 => "nan".to_string(),
-                _ => "<invalid>".to_string(),
-            };
+        // Fast path: zero
+        if self.is_zero() {
+            return "0e0".to_string();
         }
 
         let decoded = match decode_to_parts(&self.bytes) {
-            Ok(DecodedValue::Regular(d)) => d,
-            Ok(DecodedValue::Special(_)) => unreachable!("specials handled before this path"),
+            Ok(d) => d,
             Err(_) => return "<invalid>".to_string(),
         };
 
@@ -571,31 +453,15 @@ fn fmt_u64(mut n: u64, buf: &mut [u8; 20]) -> (usize, usize) {
 
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Fast path: special values (single byte — no decode needed)
-        if self.bytes.len() == 1 {
-            return f.write_str(match self.bytes[0] {
-                0x00 => "-\u{221e}",
-                0x40 => "-0",
-                0x80 => "0",
-                0xC0 => "\u{221e}",
-                0xE0 => "NaN",
-                _ => "<invalid>",
-            });
+        // Fast path: zero (single byte — no decode needed)
+        if self.is_zero() {
+            return f.write_str("0");
         }
 
         // Decode to stack buffer — no heap allocation for significand
         let mut sig_buf = [0u8; 1536];
         let parts = match decode_to_buf(&self.bytes, &mut sig_buf) {
-            Ok(Ok(p)) => p,
-            Ok(Err(s)) => {
-                return f.write_str(match s {
-                    SpecialValue::NegativeInfinity => "-\u{221e}",
-                    SpecialValue::NegativeZero => "-0",
-                    SpecialValue::PositiveZero => "0",
-                    SpecialValue::PositiveInfinity => "\u{221e}",
-                    SpecialValue::NaN => "NaN",
-                });
-            }
+            Ok(p) => p,
             Err(_) => return f.write_str("<invalid>"),
         };
 
@@ -643,11 +509,6 @@ impl fmt::Display for Decimal {
 
 impl PartialEq for Decimal {
     fn eq(&self, other: &Self) -> bool {
-        // Special case: +0 and -0 are equal
-        if self.is_zero() && other.is_zero() {
-            return true;
-        }
-        // Otherwise compare bytes
         self.bytes == other.bytes
     }
 }
@@ -662,24 +523,13 @@ impl PartialOrd for Decimal {
 
 impl Ord for Decimal {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Special case: +0 and -0 are equal (must be consistent with PartialEq)
-        if self.is_zero() && other.is_zero() {
-            return Ordering::Equal;
-        }
-        // Direct byte comparison for order preservation
         self.bytes.cmp(&other.bytes)
     }
 }
 
 impl Hash for Decimal {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Must be consistent with PartialEq: +0 == -0, so both must hash
-        // to the same value. We normalize by always hashing the +0 bytes.
-        if self.is_zero() {
-            [encode_special_byte(SpecialValue::PositiveZero)].hash(state);
-        } else {
-            self.bytes.hash(state);
-        }
+        self.bytes.hash(state);
     }
 }
 
@@ -871,7 +721,7 @@ impl From<i32> for Decimal {
 
 /// Fixed-capacity stack buffer that implements `fmt::Write`.
 ///
-/// Used by the `From<f64>` / `From<f32>` impls to format a float into
+/// Used by the `TryFrom<f64>` / `TryFrom<f32>` impls to format a float into
 /// a string without heap allocation.  25 bytes is enough for any `f64`
 /// in scientific notation: sign (1) + leading digit (1) + decimal point (1) +
 /// up to 16 fractional digits + `e` (1) + exponent sign (1) + exponent
@@ -908,33 +758,26 @@ impl fmt::Write for StackBuf {
     }
 }
 
-impl From<f64> for Decimal {
-    /// Convert an [`f64`] to a [`Decimal`](Self) using the shortest roundtrip representation.
+impl TryFrom<f64> for Decimal {
+    type Error = EncodeError;
+
+    /// Try to convert an [`f64`] to a [`Decimal`](Self).
     ///
-    /// Special float values map directly: `f64::NAN` → `Decimal::nan()`,
-    /// `f64::INFINITY` → `Decimal::infinity()`, etc. Negative zero is preserved.
-    ///
-    /// Uses a stack buffer for formatting — no heap allocation beyond the
-    /// final encoded `Vec<u8>`.
-    fn from(value: f64) -> Self {
+    /// Returns `Err` for NaN, +∞, and −∞. Negative zero is mapped to
+    /// positive zero.
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
         if value.is_nan() {
-            return Self::nan();
+            return Err(EncodeError::InvalidFormat(
+                "NaN is not representable".to_string(),
+            ));
         }
         if value.is_infinite() {
-            return if value.is_sign_positive() {
-                Self::infinity()
-            } else {
-                Self::neg_infinity()
-            };
+            return Err(EncodeError::InvalidFormat(
+                "infinity is not representable".to_string(),
+            ));
         }
         if value == 0.0 {
-            return if value.is_sign_positive() {
-                Self::zero()
-            } else {
-                Self {
-                    bytes: vec![encode_special_byte(SpecialValue::NegativeZero)],
-                }
-            };
+            return Ok(Self::zero());
         }
 
         let mut buf = StackBuf::new();
@@ -944,15 +787,15 @@ impl From<f64> for Decimal {
         // to fit in 25 bytes for any finite, non-zero f64.
         write!(buf, "{value:e}").expect("f64 scientific notation should fit in 25 bytes");
         // Delegate to FromStr — the string is already validated decimal
-        buf.as_str()
-            .parse()
-            .expect("f64 Display output should always be a valid decimal")
+        buf.as_str().parse()
     }
 }
 
-impl From<f32> for Decimal {
-    fn from(value: f32) -> Self {
-        Self::from(f64::from(value))
+impl TryFrom<f32> for Decimal {
+    type Error = EncodeError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::try_from(f64::from(value))
     }
 }
 
@@ -963,7 +806,7 @@ mod tests {
     #[test]
     fn test_parse_positive() {
         let d: Decimal = "123.456".parse().unwrap();
-        let decoded = d.decode().unwrap();
+        let decoded = decode_to_parts(d.as_bytes()).unwrap();
         assert!(decoded.positive);
         assert!(decoded.exponent_positive);
         assert_eq!(decoded.exponent, 2);
@@ -974,7 +817,7 @@ mod tests {
     #[test]
     fn test_parse_negative() {
         let d: Decimal = "-103.2".parse().unwrap();
-        let decoded = d.decode().unwrap();
+        let decoded = decode_to_parts(d.as_bytes()).unwrap();
         assert!(!decoded.positive);
         assert!(decoded.exponent_positive);
         assert_eq!(decoded.exponent, 2);
@@ -985,7 +828,7 @@ mod tests {
     #[test]
     fn test_parse_small() {
         let d: Decimal = "0.0405".parse().unwrap();
-        let decoded = d.decode().unwrap();
+        let decoded = decode_to_parts(d.as_bytes()).unwrap();
         assert!(decoded.positive);
         assert!(!decoded.exponent_positive);
         assert_eq!(decoded.exponent, 2);
@@ -1000,29 +843,45 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_infinity() {
-        let d: Decimal = "+inf".parse().unwrap();
-        assert!(d.is_pos_infinity());
+    fn test_parse_negative_zero_becomes_positive_zero() {
+        let d: Decimal = "-0".parse().unwrap();
+        assert!(d.is_zero());
+        assert_eq!(d.as_bytes(), Decimal::zero().as_bytes());
     }
 
     #[test]
-    fn test_zero_equality() {
-        let pos_zero: Decimal = "0".parse().unwrap();
-        let neg_zero: Decimal = "-0".parse().unwrap();
-        assert_eq!(pos_zero, neg_zero, "+0 should equal -0");
+    fn test_parse_negative_zero_variants() {
+        // All forms of -0 should map to positive zero
+        for input in &["-0", "-0.0", "-0.00", "-0e5", "-0.0e-3"] {
+            let d: Decimal = input.parse().unwrap();
+            assert!(d.is_zero(), "{input} should be zero");
+            assert_eq!(
+                d.as_bytes(),
+                Decimal::zero().as_bytes(),
+                "{input} should be positive zero bytes"
+            );
+        }
     }
 
     #[test]
-    fn test_special_values_case_insensitive() {
-        // Test case-insensitive parsing of special values
-        assert!("INF".parse::<Decimal>().unwrap().is_pos_infinity());
-        assert!("Inf".parse::<Decimal>().unwrap().is_pos_infinity());
-        assert!("+INFINITY".parse::<Decimal>().unwrap().is_pos_infinity());
-        assert!("-inf".parse::<Decimal>().unwrap().is_neg_infinity());
-        assert!("-Infinity".parse::<Decimal>().unwrap().is_neg_infinity());
-        assert!("NaN".parse::<Decimal>().unwrap().is_nan());
-        assert!("nan".parse::<Decimal>().unwrap().is_nan());
-        assert!("NAN".parse::<Decimal>().unwrap().is_nan());
+    fn test_parse_inf_rejected() {
+        assert!("inf".parse::<Decimal>().is_err());
+        assert!("+inf".parse::<Decimal>().is_err());
+        assert!("-inf".parse::<Decimal>().is_err());
+        assert!("infinity".parse::<Decimal>().is_err());
+        assert!("+infinity".parse::<Decimal>().is_err());
+        assert!("-infinity".parse::<Decimal>().is_err());
+        assert!("INF".parse::<Decimal>().is_err());
+        assert!("Inf".parse::<Decimal>().is_err());
+        assert!("+INFINITY".parse::<Decimal>().is_err());
+        assert!("-Infinity".parse::<Decimal>().is_err());
+    }
+
+    #[test]
+    fn test_parse_nan_rejected() {
+        assert!("nan".parse::<Decimal>().is_err());
+        assert!("NaN".parse::<Decimal>().is_err());
+        assert!("NAN".parse::<Decimal>().is_err());
     }
 
     #[test]
@@ -1030,23 +889,6 @@ mod tests {
         // Should fail with multiple decimal points
         assert!("123.456.789".parse::<Decimal>().is_err());
         assert!("1.2.3".parse::<Decimal>().is_err());
-    }
-
-    #[test]
-    fn test_zero_ord_consistency() {
-        // Ord must agree with PartialEq: +0 == -0 implies cmp == Equal
-        let pos_zero: Decimal = "0".parse().unwrap();
-        let neg_zero: Decimal = "-0".parse().unwrap();
-        assert_eq!(
-            pos_zero.cmp(&neg_zero),
-            Ordering::Equal,
-            "+0.cmp(-0) must be Equal to match PartialEq"
-        );
-        assert_eq!(
-            neg_zero.cmp(&pos_zero),
-            Ordering::Equal,
-            "-0.cmp(+0) must be Equal to match PartialEq"
-        );
     }
 
     #[test]
@@ -1181,46 +1023,46 @@ mod tests {
     }
 
     // =========================================================================
-    // From<f64> / From<f32> tests
+    // TryFrom<f64> / TryFrom<f32> tests
     // =========================================================================
 
     #[test]
-    fn test_from_f64_matches_parse() {
+    fn test_try_from_f64_matches_parse() {
         let cases: &[f64] = &[1.0, -1.0, 0.5, -0.5, 42.0, 123.456, 0.001, 1e10, 1e-10];
         for &v in cases {
-            let from_float = Decimal::from(v);
+            let from_float = Decimal::try_from(v).unwrap();
             let from_str: Decimal = v.to_string().parse().unwrap();
             assert_eq!(
                 from_float.as_bytes(),
                 from_str.as_bytes(),
-                "From<f64> mismatch for {v}"
+                "TryFrom<f64> mismatch for {v}"
             );
         }
     }
 
     #[test]
-    fn test_from_f64_special_values() {
-        assert!(Decimal::from(f64::NAN).is_nan());
-        assert!(Decimal::from(f64::INFINITY).is_pos_infinity());
-        assert!(Decimal::from(f64::NEG_INFINITY).is_neg_infinity());
-        assert!(Decimal::from(0.0_f64).is_zero());
-        assert!(Decimal::from(-0.0_f64).is_zero());
+    fn test_try_from_f64_special_values_rejected() {
+        assert!(Decimal::try_from(f64::NAN).is_err());
+        assert!(Decimal::try_from(f64::INFINITY).is_err());
+        assert!(Decimal::try_from(f64::NEG_INFINITY).is_err());
     }
 
     #[test]
-    fn test_from_f64_negative_zero_preserved() {
-        let neg_zero = Decimal::from(-0.0_f64);
-        let pos_zero = Decimal::from(0.0_f64);
-        // Both are zero and compare equal
-        assert_eq!(neg_zero, pos_zero);
-        // But their underlying bytes differ (-0 = 0x40, +0 = 0x80)
-        assert_ne!(neg_zero.as_bytes(), pos_zero.as_bytes());
+    fn test_try_from_f64_zero() {
+        assert!(Decimal::try_from(0.0_f64).unwrap().is_zero());
+        // -0.0 maps to positive zero
+        let neg_zero = Decimal::try_from(-0.0_f64).unwrap();
+        assert!(neg_zero.is_zero());
+        assert_eq!(neg_zero.as_bytes(), Decimal::zero().as_bytes());
     }
 
     #[test]
-    fn test_from_f64_order_preserved() {
+    fn test_try_from_f64_order_preserved() {
         let values: Vec<f64> = vec![-1000.0, -1.0, -0.001, 0.001, 1.0, 1000.0];
-        let decimals: Vec<Decimal> = values.iter().map(|&v| Decimal::from(v)).collect();
+        let decimals: Vec<Decimal> = values
+            .iter()
+            .map(|&v| Decimal::try_from(v).unwrap())
+            .collect();
         for i in 1..decimals.len() {
             assert!(
                 decimals[i - 1] < decimals[i],
@@ -1232,10 +1074,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_f32_matches_f64_widening() {
+    fn test_try_from_f32_matches_f64_widening() {
         let v = 2.72_f32;
-        let from_f32 = Decimal::from(v);
-        let from_f64 = Decimal::from(f64::from(v));
+        let from_f32 = Decimal::try_from(v).unwrap();
+        let from_f64 = Decimal::try_from(f64::from(v)).unwrap();
         assert_eq!(from_f32.as_bytes(), from_f64.as_bytes());
     }
 
@@ -1264,27 +1106,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_zero_normalization() {
-        use std::collections::hash_map::DefaultHasher;
-
-        let pos_zero: Decimal = "0".parse().unwrap();
-        let neg_zero: Decimal = "-0".parse().unwrap();
-        assert_eq!(pos_zero, neg_zero, "precondition: +0 == -0");
-
-        let hash_pos = {
-            let mut h = DefaultHasher::new();
-            pos_zero.hash(&mut h);
-            h.finish()
-        };
-        let hash_neg = {
-            let mut h = DefaultHasher::new();
-            neg_zero.hash(&mut h);
-            h.finish()
-        };
-        assert_eq!(hash_pos, hash_neg, "+0 and -0 must hash equally");
-    }
-
-    #[test]
     fn test_hash_in_hashset() {
         use std::collections::HashSet;
 
@@ -1293,7 +1114,6 @@ mod tests {
         set.insert("42".parse::<Decimal>().unwrap()); // duplicate
         set.insert("-7".parse::<Decimal>().unwrap());
         set.insert("0".parse::<Decimal>().unwrap());
-        set.insert("-0".parse::<Decimal>().unwrap()); // duplicate of 0
 
         assert_eq!(set.len(), 3, "HashSet should deduplicate equal values");
     }
@@ -1495,5 +1315,23 @@ mod tests {
         );
         let d2: Decimal = plain.parse().unwrap();
         assert_eq!(d.as_bytes(), d2.as_bytes());
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_old_special_values() {
+        // -inf
+        assert!(Decimal::from_bytes(&[0x00]).is_err());
+        // -0
+        assert!(Decimal::from_bytes(&[0x40]).is_err());
+        // +inf
+        assert!(Decimal::from_bytes(&[0xC0]).is_err());
+        // NaN
+        assert!(Decimal::from_bytes(&[0xE0]).is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_accepts_zero() {
+        let d = Decimal::from_bytes(&[0x80]).unwrap();
+        assert!(d.is_zero());
     }
 }

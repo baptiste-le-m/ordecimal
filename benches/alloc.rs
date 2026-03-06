@@ -264,10 +264,10 @@ fn main() {
         bytes,
     });
 
-    // From<f64>
-    let (_, allocs, bytes) = measure(|| Decimal::from(123.456_789_f64));
+    // TryFrom<f64>
+    let (_, allocs, bytes) = measure(|| Decimal::try_from(123.456_789_f64).unwrap());
     rows.push(Row {
-        name: "From<f64> (123.456789)",
+        name: "TryFrom<f64> (123.456789)",
         lib: "ordecimal",
         allocs,
         bytes,
@@ -286,35 +286,13 @@ fn main() {
             .unwrap()
     });
     rows.push(Row {
-        name: "From<f64> (123.456789)",
+        name: "TryFrom<f64> (123.456789)",
         lib: "memcomparable",
         allocs,
         bytes,
     });
 
-    // Special values
-    let (_, allocs, bytes) = measure(Decimal::nan);
-    rows.push(Row {
-        name: "nan()",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-    let (_, allocs, bytes) = measure(DbDecimal::nan);
-    rows.push(Row {
-        name: "nan()",
-        lib: "decimal-bytes",
-        allocs,
-        bytes,
-    });
-    let (_, allocs, bytes) = measure(|| McDecimal::NaN.to_vec().unwrap());
-    rows.push(Row {
-        name: "nan()",
-        lib: "memcomparable",
-        allocs,
-        bytes,
-    });
-
+    // Zero
     let (_, allocs, bytes) = measure(Decimal::zero);
     rows.push(Row {
         name: "zero()",
@@ -337,75 +315,9 @@ fn main() {
         bytes,
     });
 
-    // -- Decoding ----------------------------------------------------------
-
-    // ordecimal decode()
-    let small: Decimal = "42".parse().unwrap();
-    let (_, allocs, bytes) = measure(|| small.decode());
-    rows.push(Row {
-        name: "decode() small",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-
-    let medium: Decimal = "123.456789".parse().unwrap();
-    let (_, allocs, bytes) = measure(|| medium.decode());
-    rows.push(Row {
-        name: "decode() medium",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-
-    // memcomparable decode
-    let mc_small_bytes = McDecimal::from_str("42").unwrap().to_vec().unwrap();
-    let (_, allocs, bytes) = measure(|| McDecimal::from_slice(&mc_small_bytes).unwrap());
-    rows.push(Row {
-        name: "decode() small",
-        lib: "memcomparable",
-        allocs,
-        bytes,
-    });
-
-    let mc_medium_bytes = McDecimal::from_str("123.456789").unwrap().to_vec().unwrap();
-    let (_, allocs, bytes) = measure(|| McDecimal::from_slice(&mc_medium_bytes).unwrap());
-    rows.push(Row {
-        name: "decode() medium",
-        lib: "memcomparable",
-        allocs,
-        bytes,
-    });
-
-    let dynamodb: Decimal = dynamodb_str.parse().unwrap();
-    let (_, allocs, bytes) = measure(|| dynamodb.decode());
-    rows.push(Row {
-        name: "decode() DynamoDB (38 digits)",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-
-    let large: Decimal = large_str.parse().unwrap();
-    let (_, allocs, bytes) = measure(|| large.decode());
-    rows.push(Row {
-        name: "decode() large (100 digits)",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-
-    let very_large: Decimal = very_large_str.parse().unwrap();
-    let (_, allocs, bytes) = measure(|| very_large.decode());
-    rows.push(Row {
-        name: "decode() very large (1000 digits)",
-        lib: "ordecimal",
-        allocs,
-        bytes,
-    });
-
     // -- Display -----------------------------------------------------------
 
+    let small: Decimal = "42".parse().unwrap();
     let (_, allocs, bytes) = measure(|| format!("{small}"));
     rows.push(Row {
         name: "Display small",
@@ -430,6 +342,7 @@ fn main() {
         bytes,
     });
 
+    let medium: Decimal = "123.456789".parse().unwrap();
     let (_, allocs, bytes) = measure(|| format!("{medium}"));
     rows.push(Row {
         name: "Display medium",
@@ -454,6 +367,7 @@ fn main() {
         bytes,
     });
 
+    let large: Decimal = large_str.parse().unwrap();
     let (_, allocs, bytes) = measure(|| format!("{large}"));
     rows.push(Row {
         name: "Display large (100 digits)",
@@ -569,10 +483,10 @@ fn main() {
 
     let (_, allocs, bytes) = measure(|| {
         let d: Decimal = "123.456789".parse().unwrap();
-        d.decode()
+        d.to_plain_string()
     });
     rows.push(Row {
-        name: "roundtrip: str -> encode -> decode()",
+        name: "roundtrip: str -> encode -> to_plain_string()",
         lib: "ordecimal",
         allocs,
         bytes,

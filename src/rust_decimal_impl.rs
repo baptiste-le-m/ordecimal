@@ -6,8 +6,8 @@
 //! - [`From<rust_decimal::Decimal>`](From) for [`Decimal`] — infallible conversion
 //!   (every `rust_decimal` value is representable in ordecimal).
 //! - [`TryFrom<Decimal>`](TryFrom) for [`rust_decimal::Decimal`] — fallible conversion
-//!   because ordecimal can represent values outside `rust_decimal`'s range (infinity, NaN,
-//!   and numbers exceeding 96-bit / 28-digit precision).
+//!   because ordecimal can represent values outside `rust_decimal`'s range
+//!   (numbers exceeding 96-bit / 28-digit precision).
 
 use crate::Decimal;
 use thiserror::Error;
@@ -16,10 +16,6 @@ use thiserror::Error;
 /// to a [`rust_decimal::Decimal`].
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum RustDecimalConversionError {
-    /// The ordecimal value is a special value (infinity or NaN) that
-    /// `rust_decimal` does not support.
-    #[error("cannot convert special value (infinity/NaN) to rust_decimal::Decimal")]
-    UnsupportedSpecialValue,
     /// The ordecimal value exceeds `rust_decimal`'s representable range
     /// (96-bit coefficient, scale 0–28).
     #[error("value {0} is outside rust_decimal::Decimal representable range")]
@@ -41,8 +37,8 @@ impl From<rust_decimal::Decimal> for Decimal {
 
 /// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`rust_decimal::Decimal`].
 ///
-/// Fails if the ordecimal value is a special value (infinity, NaN) or exceeds
-/// `rust_decimal`'s 96-bit coefficient / 28-digit precision.
+/// Fails if the ordecimal value exceeds `rust_decimal`'s 96-bit coefficient /
+/// 28-digit precision.
 impl TryFrom<Decimal> for rust_decimal::Decimal {
     type Error = RustDecimalConversionError;
 
@@ -57,16 +53,6 @@ impl TryFrom<&Decimal> for rust_decimal::Decimal {
 
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
         let s = value.to_scientific_string();
-
-        // Check for special values that rust_decimal cannot represent
-        match s.as_str() {
-            "inf" | "-inf" | "nan" => {
-                return Err(RustDecimalConversionError::UnsupportedSpecialValue);
-            }
-            // Negative zero has no distinct representation in rust_decimal
-            "-0e0" => return Ok(rust_decimal::Decimal::ZERO),
-            _ => {}
-        }
 
         rust_decimal::Decimal::from_scientific(&s)
             .map_err(|_| RustDecimalConversionError::OutOfRange(s))
@@ -165,36 +151,6 @@ mod tests {
         let od = Decimal::zero();
         let rd = rust_decimal::Decimal::try_from(&od).unwrap();
         assert_eq!(rd, rust_decimal::Decimal::ZERO);
-    }
-
-    #[test]
-    fn try_into_rust_decimal_negative_zero() {
-        // ordecimal distinguishes -0 from +0, but rust_decimal does not.
-        // The conversion should succeed and return ZERO.
-        let od: Decimal = "-0".parse().unwrap();
-        let rd = rust_decimal::Decimal::try_from(&od).unwrap();
-        assert_eq!(rd, rust_decimal::Decimal::ZERO);
-    }
-
-    #[test]
-    fn try_into_rust_decimal_infinity_fails() {
-        let od = Decimal::infinity();
-        let err = rust_decimal::Decimal::try_from(&od).unwrap_err();
-        assert_eq!(err, RustDecimalConversionError::UnsupportedSpecialValue);
-    }
-
-    #[test]
-    fn try_into_rust_decimal_neg_infinity_fails() {
-        let od = Decimal::neg_infinity();
-        let err = rust_decimal::Decimal::try_from(&od).unwrap_err();
-        assert_eq!(err, RustDecimalConversionError::UnsupportedSpecialValue);
-    }
-
-    #[test]
-    fn try_into_rust_decimal_nan_fails() {
-        let od = Decimal::nan();
-        let err = rust_decimal::Decimal::try_from(&od).unwrap_err();
-        assert_eq!(err, RustDecimalConversionError::UnsupportedSpecialValue);
     }
 
     #[test]

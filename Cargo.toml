@@ -14,17 +14,26 @@ exclude = [".github/"]
 [features]
 serde = ["dep:serde"]
 rust_decimal = ["dep:rust_decimal"]
+bigdecimal = ["dep:bigdecimal"]
+decimal_rs = ["dep:decimal_rs"]
+num_bigint = ["dep:num_bigint"]
 
 [dependencies]
+bigdecimal = { version = "0.4", optional = true, default-features = false }
+decimal_rs = { version = "0.1", optional = true, default-features = false, package = "decimal-rs" }
+num_bigint = { version = "0.4", optional = true, default-features = false, package = "num-bigint" }
 rust_decimal = { version = "1", optional = true, default-features = false }
 serde = { version = "1", optional = true }
 thiserror = "1.0"
 
 [dev-dependencies]
+bigdecimal = "0.4"
 bincode = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 decimal-bytes = "0.4"
+decimal-rs = "0.1"
 memcomparable = { version = "0.2", features = ["decimal"] }
+num-bigint = "0.4"
 proptest = "1.0"
 rust_decimal = "1"
 serde_json = "1"

@@ -13,8 +13,10 @@ exclude = [".github/"]
 
 [features]
 serde = ["dep:serde"]
+rust_decimal = ["dep:rust_decimal"]
 
 [dependencies]
+rust_decimal = { version = "1", optional = true, default-features = false }
 serde = { version = "1", optional = true }
 thiserror = "1.0"
 

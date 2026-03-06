@@ -476,6 +476,59 @@ impl Decimal {
         out
     }
 
+    /// Produce a scientific-notation string (`"1.23e5"`, `"-4.56e-3"`)
+    /// that can round-trip through [`FromStr`].
+    ///
+    /// Unlike [`to_plain_string`](Self::to_plain_string), this method **always**
+    /// uses `e`-notation, regardless of exponent magnitude. Zero is returned
+    /// as `"0e0"` (or `"-0e0"`). Non-numeric special values are returned as
+    /// `"inf"`, `"-inf"`, or `"nan"` (no `e`-notation since they have no
+    /// exponent).
+    pub fn to_scientific_string(&self) -> String {
+        // Fast path: special values (single byte)
+        if self.bytes.len() == 1 {
+            return match self.bytes[0] {
+                0x00 => "-inf".to_string(),
+                0x40 => "-0e0".to_string(),
+                0x80 => "0e0".to_string(),
+                0xC0 => "inf".to_string(),
+                0xE0 => "nan".to_string(),
+                _ => "<invalid>".to_string(),
+            };
+        }
+
+        let decoded = match decode_to_parts(&self.bytes) {
+            Ok(DecodedValue::Regular(d)) => d,
+            Ok(DecodedValue::Special(_)) => unreachable!("specials handled before this path"),
+            Err(_) => return "<invalid>".to_string(),
+        };
+
+        let sig_end = decoded
+            .significand
+            .iter()
+            .rposition(|&x| x != 0)
+            .map_or(1, |p| p + 1);
+
+        let mut sig_vec: Vec<u8> = decoded.significand[..sig_end].to_vec();
+
+        for b in &mut sig_vec {
+            *b += b'0';
+        }
+        let sig = unsafe { std::str::from_utf8_unchecked(&sig_vec) };
+
+        let parts = DecodedParts {
+            positive: decoded.positive,
+            exponent_positive: decoded.exponent_positive,
+            exponent: decoded.exponent,
+            sig_len: decoded.significand.len(),
+        };
+        let mut out = String::with_capacity(sig.len() + 8);
+        if !parts.positive {
+            out.push('-');
+        }
+        Self::format_scientific(&mut out, sig, &parts)
+    }
+
     /// Format as `d.dddeSIGNexp` into the already-sign-prefixed `out` buffer.
     fn format_scientific(out: &mut String, sig: &str, parts: &DecodedParts) -> String {
         out.push_str(&sig[..1]);

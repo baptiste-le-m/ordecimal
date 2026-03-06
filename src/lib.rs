@@ -51,6 +51,8 @@ pub(crate) mod decoder;
 pub(crate) mod encoder;
 pub(crate) mod error;
 pub(crate) mod gamma;
+#[cfg(feature = "rust_decimal")]
+mod rust_decimal_impl;
 #[cfg(feature = "serde")]
 mod serde_impl;
 pub(crate) mod significand;
@@ -59,6 +61,8 @@ pub(crate) mod significand;
 pub use decimal::{Decimal, SpecialValue};
 pub use decoder::DecodedDecimal;
 pub use error::{DecodeError, DecodeResult, EncodeError, EncodeResult};
+#[cfg(feature = "rust_decimal")]
+pub use rust_decimal_impl::RustDecimalConversionError;
 
 #[cfg(test)]
 mod tests {

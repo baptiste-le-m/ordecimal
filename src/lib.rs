@@ -46,6 +46,7 @@
 //! - **E** (variable): Exponent using modified Elias Gamma code
 //! - **M** (variable): Significand using tetrades (4 bits) and declets (10 bits per 3 digits)
 
+mod arithmetic;
 #[cfg(feature = "bigdecimal")]
 mod bigdecimal_impl;
 pub(crate) mod decimal;

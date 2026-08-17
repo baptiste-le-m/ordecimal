@@ -5,6 +5,7 @@
 ### Features
 
 - **`TryFrom<Decimal>` for primitive integers**: `i8`–`i128`, `u8`–`u128` — returns `IntegerConversionError` for fractional or out-of-range values
+- **`rust_decimal` integration** (feature `rust_decimal`): `From<rust_decimal::Decimal> for Decimal` (infallible) and `TryFrom<Decimal> for rust_decimal::Decimal` (fallible — returns `RustDecimalConversionError::OutOfRange` beyond a 96-bit coefficient / scale 0–28)
 - **`bigdecimal` integration** (feature `bigdecimal`): `From<BigDecimal> for Decimal` and `From<Decimal> for BigDecimal` — both infallible since both types support arbitrary precision
 - **`decimal-rs` integration** (feature `decimal_rs`): `From<decimal_rs::Decimal> for Decimal` (infallible) and `TryFrom<Decimal> for decimal_rs::Decimal` (fallible — 38-digit / scale limits)
 - **`num-bigint` integration** (feature `num_bigint`): `From<BigInt/BigUint> for Decimal` (infallible) and `TryFrom<Decimal> for BigInt/BigUint` (fallible — rejects fractional/negative values)
@@ -20,7 +21,10 @@
 - **`"-0"` normalizes to positive zero**: parsing `-0` no longer creates a distinct negative zero
 - **`from_bytes` rejects old special-value bytes**: `0x00` (−∞), `0x40` (−0), `0xC0` (+∞), `0xE0` (NaN) now return `DecodeError::InvalidSpecialValue` — **data-breaking** for stored bytes
 - **Simplified `PartialEq`/`Ord`/`Hash`**: direct byte comparison with no +0/−0 normalization (no longer needed)
-- **`RustDecimalConversionError::UnsupportedSpecialValue` removed**: only `OutOfRange` remains
+
+### Fixes
+
+- **`BigInt`/`BigUint` conversions with large exponents**: `TryFrom<Decimal>` used `to_plain_string()`, which switches to scientific notation past exponent 1000 — a form `num-bigint`'s `FromStr` cannot parse, so valid integers such as `1e5000` were rejected as `NotAnInteger`. Both conversions now decode the binary form via `decode_to_parts` and build the digit string directly
 
 ### Rationale
 

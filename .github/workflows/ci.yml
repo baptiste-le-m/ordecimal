@@ -63,3 +63,4 @@ jobs:
       - run: cargo +nightly fuzz run fuzz_parse -- -max_total_time=30
       - run: cargo +nightly fuzz run fuzz_decode -- -max_total_time=30
       - run: cargo +nightly fuzz run fuzz_roundtrip -- -max_total_time=30
+      - run: cargo +nightly fuzz run fuzz_arithmetic -- -max_total_time=30

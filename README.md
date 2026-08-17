@@ -83,6 +83,39 @@ Negative zero (`"-0"`) is normalized to positive zero.
 `u8`–`u128`), returning an error if the value has a fractional part or exceeds
 the target type's range.
 
+## Arithmetic
+
+```rust
+use ordecimal::Decimal;
+
+let a: Decimal = "0.1".parse().unwrap();
+let b: Decimal = "0.2".parse().unwrap();
+
+assert_eq!((&a + &b).to_plain_string(), "0.3");   // not 0.30000000000000004
+assert_eq!((&b - &a).to_plain_string(), "0.1");
+assert_eq!((-&a).to_plain_string(), "-0.1");
+
+// owned, borrowed, or mixed operands all work
+let mut total = a.clone() + &b;
+total += &b;
+assert_eq!(total.to_plain_string(), "0.5");
+
+// summing an iterator
+let values = vec![a, b];
+let sum: Decimal = values.iter().sum();
+assert_eq!(sum.to_plain_string(), "0.3");
+```
+
+`Add`, `Sub` and `Neg` are exact: computed on base-10 digit arrays with no
+floating point and no rounding, so a 38-digit DynamoDB number keeps all 38
+digits. Results are ordinary encoded values — byte order still matches numeric
+order.
+
+Operands with distant exponents have to be aligned with trailing zeros
+(`1e100 + 1` needs 101 digits). That alignment is capped at 100 000 digits and
+**panics** beyond it, the same way integer overflow panics in `std`. Practical
+values never come close; `1e100000 + 1` does.
+
 ## Serde
 
 Enable the `serde` feature for `Serialize` / `Deserialize`:

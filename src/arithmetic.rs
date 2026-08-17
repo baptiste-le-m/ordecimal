@@ -1,10 +1,23 @@
-//! Arithmetic operations for [`Decimal`]: `Add`, `Sub`, and `Neg`.
+//! Arithmetic operations for [`Decimal`]: `Add`, `Sub`, `Neg`, the matching
+//! assignment operators, and [`Sum`].
 //!
 //! All arithmetic is performed on digit arrays (base-10, schoolbook method)
 //! with no floating-point involved, preserving full precision.
+//!
+//! # Digit budget
+//!
+//! Adding two values whose exponents are far apart forces the smaller one to be
+//! materialized as trailing zeros: `1e100 + 1` needs 101 digits. Operands are
+//! aligned this way up to `MAX_DIGIT_COUNT` digits; beyond that the operation
+//! **panics** rather than allocating unbounded memory. The limit is 100 000
+//! digits — far past any practical use (DynamoDB numbers hold at most 38), but
+//! reachable with deliberately extreme exponents such as `1e100000 + 1`.
+//! Treat it like integer overflow in `std`: a bug in the caller, not a runtime
+//! condition to handle.
 
 use std::cmp::Ordering;
-use std::ops::{Add, Neg, Sub};
+use std::iter::Sum;
+use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 use crate::decimal::Decimal;
 use crate::decoder::decode_to_parts;
@@ -267,16 +280,20 @@ fn add_decomposed(a: &Decomposed, b: &Decomposed) -> Decomposed {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-impl Add for Decimal {
-    type Output = Decimal;
-
-    fn add(self, rhs: Decimal) -> Decimal {
-        let a = Decomposed::from_decimal(&self);
-        let b = Decomposed::from_decimal(&rhs);
-        add_decomposed(&a, &b).to_decimal()
-    }
-}
-
+/// Exact addition, preserving every digit of both operands.
+///
+/// # Panics
+///
+/// Panics if aligning the operands would need more than 100 000 digits, which
+/// only happens for exponents far outside any practical range (`1e100000 + 1`).
+///
+/// ```rust
+/// use ordecimal::Decimal;
+///
+/// let a: Decimal = "0.1".parse().unwrap();
+/// let b: Decimal = "0.2".parse().unwrap();
+/// assert_eq!((&a + &b).to_plain_string(), "0.3");
+/// ```
 impl Add for &Decimal {
     type Output = Decimal;
 
@@ -284,6 +301,56 @@ impl Add for &Decimal {
         let a = Decomposed::from_decimal(self);
         let b = Decomposed::from_decimal(rhs);
         add_decomposed(&a, &b).to_decimal()
+    }
+}
+
+impl Add for Decimal {
+    type Output = Decimal;
+
+    fn add(self, rhs: Decimal) -> Decimal {
+        &self + &rhs
+    }
+}
+
+impl Add<&Decimal> for Decimal {
+    type Output = Decimal;
+
+    fn add(self, rhs: &Decimal) -> Decimal {
+        &self + rhs
+    }
+}
+
+impl Add<Decimal> for &Decimal {
+    type Output = Decimal;
+
+    fn add(self, rhs: Decimal) -> Decimal {
+        self + &rhs
+    }
+}
+
+impl AddAssign for Decimal {
+    fn add_assign(&mut self, rhs: Decimal) {
+        *self = &*self + &rhs;
+    }
+}
+
+impl AddAssign<&Decimal> for Decimal {
+    fn add_assign(&mut self, rhs: &Decimal) {
+        *self = &*self + rhs;
+    }
+}
+
+/// Negation. Zero is its own negative — there is no −0 in this encoding.
+impl Neg for &Decimal {
+    type Output = Decimal;
+
+    fn neg(self) -> Decimal {
+        if self.is_zero() {
+            return self.clone();
+        }
+        let mut d = Decomposed::from_decimal(self);
+        d.positive = !d.positive;
+        d.to_decimal()
     }
 }
 
@@ -300,16 +367,16 @@ impl Neg for Decimal {
     }
 }
 
-impl Neg for &Decimal {
+/// Exact subtraction, preserving every digit of both operands.
+///
+/// # Panics
+///
+/// Same digit budget as [`Add`]: panics past 100 000 aligned digits.
+impl Sub for &Decimal {
     type Output = Decimal;
 
-    fn neg(self) -> Decimal {
-        if self.is_zero() {
-            return self.clone();
-        }
-        let mut d = Decomposed::from_decimal(self);
-        d.positive = !d.positive;
-        d.to_decimal()
+    fn sub(self, rhs: &Decimal) -> Decimal {
+        self + &(-rhs)
     }
 }
 
@@ -317,15 +384,59 @@ impl Sub for Decimal {
     type Output = Decimal;
 
     fn sub(self, rhs: Decimal) -> Decimal {
-        self + (-rhs)
+        &self - &rhs
     }
 }
 
-impl Sub for &Decimal {
+impl Sub<&Decimal> for Decimal {
     type Output = Decimal;
 
     fn sub(self, rhs: &Decimal) -> Decimal {
-        self + &(-rhs)
+        &self - rhs
+    }
+}
+
+impl Sub<Decimal> for &Decimal {
+    type Output = Decimal;
+
+    fn sub(self, rhs: Decimal) -> Decimal {
+        self - &rhs
+    }
+}
+
+impl SubAssign for Decimal {
+    fn sub_assign(&mut self, rhs: Decimal) {
+        *self = &*self - &rhs;
+    }
+}
+
+impl SubAssign<&Decimal> for Decimal {
+    fn sub_assign(&mut self, rhs: &Decimal) {
+        *self = &*self - rhs;
+    }
+}
+
+/// Sums an iterator of decimals exactly; an empty iterator sums to zero.
+///
+/// ```rust
+/// use ordecimal::Decimal;
+///
+/// let values: Vec<Decimal> = ["0.1", "0.2", "0.3"]
+///     .iter()
+///     .map(|s| s.parse().unwrap())
+///     .collect();
+/// let total: Decimal = values.iter().sum();
+/// assert_eq!(total.to_plain_string(), "0.6");
+/// ```
+impl Sum for Decimal {
+    fn sum<I: Iterator<Item = Decimal>>(iter: I) -> Decimal {
+        iter.fold(Decimal::zero(), |acc, x| &acc + &x)
+    }
+}
+
+impl<'a> Sum<&'a Decimal> for Decimal {
+    fn sum<I: Iterator<Item = &'a Decimal>>(iter: I) -> Decimal {
+        iter.fold(Decimal::zero(), |acc, x| &acc + x)
     }
 }
 
@@ -572,5 +683,75 @@ mod tests {
         let bytes = result.as_bytes();
         let recovered = Decimal::from_bytes(bytes).unwrap();
         assert_eq!(result, recovered);
+    }
+
+    // ── Operand ownership combinations ──────────────────────────────────
+
+    #[test]
+    fn add_accepts_every_ownership_combination() {
+        let expected = "8";
+        assert_eq!((d("5") + d("3")).to_plain_string(), expected);
+        assert_eq!((&d("5") + &d("3")).to_plain_string(), expected);
+        assert_eq!((d("5") + &d("3")).to_plain_string(), expected);
+        assert_eq!((&d("5") + d("3")).to_plain_string(), expected);
+    }
+
+    #[test]
+    fn sub_accepts_every_ownership_combination() {
+        let expected = "2";
+        assert_eq!((d("5") - d("3")).to_plain_string(), expected);
+        assert_eq!((&d("5") - &d("3")).to_plain_string(), expected);
+        assert_eq!((d("5") - &d("3")).to_plain_string(), expected);
+        assert_eq!((&d("5") - d("3")).to_plain_string(), expected);
+    }
+
+    // ── Assignment operators ────────────────────────────────────────────
+
+    #[test]
+    fn add_assign_owned_and_borrowed() {
+        let mut a = d("1.5");
+        a += d("2.25");
+        assert_eq!(a.to_plain_string(), "3.75");
+        a += &d("-0.75");
+        assert_eq!(a.to_plain_string(), "3");
+    }
+
+    #[test]
+    fn sub_assign_owned_and_borrowed() {
+        let mut a = d("10");
+        a -= d("2.5");
+        assert_eq!(a.to_plain_string(), "7.5");
+        a -= &d("7.5");
+        assert!(a.is_zero());
+    }
+
+    // ── Sum ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sum_of_owned_values() {
+        let values = vec![d("0.1"), d("0.2"), d("0.3")];
+        let total: Decimal = values.into_iter().sum();
+        assert_eq!(total.to_plain_string(), "0.6");
+    }
+
+    #[test]
+    fn sum_of_borrowed_values() {
+        let values = [d("1e10"), d("-1"), d("0.001")];
+        let total: Decimal = values.iter().sum();
+        assert_eq!(total.to_plain_string(), "9999999999.001");
+    }
+
+    #[test]
+    fn sum_of_empty_iterator_is_zero() {
+        let total: Decimal = Vec::<Decimal>::new().into_iter().sum();
+        assert!(total.is_zero());
+    }
+
+    // ── Digit budget ────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "more than 100000 digits")]
+    fn add_beyond_digit_budget_panics() {
+        let _ = &d("1e100000") + &d("1");
     }
 }

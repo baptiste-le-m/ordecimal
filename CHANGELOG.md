@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+### Features
+
+- **Arithmetic on `Decimal`**: `Add`, `Sub`, `Neg`, `AddAssign`, `SubAssign` and `Sum`, in every operand-ownership combination (`a + b`, `&a + &b`, `a + &b`, `&a + b`). Computed with schoolbook base-10 digit arrays — no floating point, no rounding, no precision limit beyond the digit budget below
+- **`Sum` for iterators**: `values.iter().sum::<Decimal>()` and `values.into_iter().sum::<Decimal>()`; an empty iterator sums to zero
+
+### Notes
+
+- Aligning operands with distant exponents materializes trailing zeros (`1e100 + 1` needs 101 digits). Operations are capped at 100 000 aligned digits and **panic** beyond that, like integer overflow in `std`. Unreachable for practical values — DynamoDB numbers hold at most 38 digits — but `1e100000 + 1` will panic
+- Arithmetic results are ordinary encoded values: byte order still matches numeric order, and `from_bytes` round-trips them
+
+### Tests
+
+- Property tests cross-checking `Add`/`Sub`/`Neg`/`Sum` against `bigdecimal`, plus order preservation and byte round-trip of results
+- `fuzz_arithmetic` fuzz target now runs in CI alongside the parse/decode/roundtrip targets
+
 ## 0.3.0
 
 ### Features

@@ -111,10 +111,12 @@ floating point and no rounding, so a 38-digit DynamoDB number keeps all 38
 digits. Results are ordinary encoded values — byte order still matches numeric
 order.
 
-Operands with distant exponents have to be aligned with trailing zeros
-(`1e100 + 1` needs 101 digits). That alignment is capped at 100 000 digits and
-**panics** beyond it, the same way integer overflow panics in `std`. Practical
-values never come close; `1e100000 + 1` does.
+Two limits panic, the same way integer overflow panics in `std`. Operands with
+distant exponents have to be aligned with trailing zeros (`1e100 + 1` needs 101
+digits); that alignment is capped at 100 000 digits. And a result whose exponent
+leaves the encodable range of ±(`u64::MAX - 2`) — reachable only from stored
+bytes, since parsing caps exponents at `i64::MAX` — has no representation at all.
+Practical values never come close to either.
 
 ## Serde
 

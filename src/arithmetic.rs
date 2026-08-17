@@ -14,6 +14,18 @@
 //! reachable with deliberately extreme exponents such as `1e100000 + 1`.
 //! Treat it like integer overflow in `std`: a bug in the caller, not a runtime
 //! condition to handle.
+//!
+//! # Exponent range
+//!
+//! The format encodes exponents up to `MAX_EXPONENT` (`u64::MAX - 2`) in either
+//! direction. A carry can push a result one place past that ceiling
+//! (`5e(MAX) + 5e(MAX)`), and cancellation between near-equal values can push it
+//! past the floor (`1.001e-(MAX) - 1e-(MAX)`), from operands that are themselves
+//! perfectly encodable. Such results have no representation, so they panic in
+//! the same class as the digit budget rather than yielding bytes that no decoder
+//! would accept. Values this extreme cannot be parsed at all — `FromStr` caps
+//! exponents at `i64::MAX` — they only arise from stored bytes read back through
+//! `from_bytes`.
 
 use std::cmp::Ordering;
 use std::iter::Sum;
@@ -21,7 +33,7 @@ use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 use crate::decimal::Decimal;
 use crate::decoder::decode_to_parts;
-use crate::encoder::encode_from_parts;
+use crate::encoder::{encode_from_parts, MAX_EXPONENT};
 
 // ---------------------------------------------------------------------------
 // Internal representation for arithmetic
@@ -105,16 +117,20 @@ impl Decomposed {
         // where total_digit_count is BEFORE trailing zero stripping
         let signed_exp = self.power + (digits.len() as i128 - 1);
 
-        let (exponent, exponent_positive) = if signed_exp >= 0 {
-            // i128 → u64: safe because the encoder uses Elias Gamma with count < 64,
-            // so valid exponents fit in u64. Panic on overflow = corrupted Decomposed.
-            (u64::try_from(signed_exp).expect("exponent overflow"), true)
-        } else {
-            (
-                u64::try_from(signed_exp.unsigned_abs()).expect("exponent overflow"),
-                false,
-            )
-        };
+        // A carry can push the result one decimal place past the largest
+        // encodable exponent, and cancelling near-equal values can push it one
+        // place below the smallest — both from operands the encoding accepts.
+        // Neither is representable, so refuse loudly instead of handing back
+        // bytes no decoder would take.
+        let magnitude = signed_exp.unsigned_abs();
+        assert!(
+            magnitude <= u128::from(MAX_EXPONENT),
+            "ordecimal: result exponent {signed_exp} is outside the encodable \
+             range of ±{MAX_EXPONENT}"
+        );
+
+        let exponent = magnitude as u64;
+        let exponent_positive = signed_exp >= 0;
 
         let bytes = encode_from_parts(self.positive, exponent_positive, exponent, significand);
         Decimal::from_bytes_unchecked(bytes)
@@ -284,8 +300,10 @@ fn add_decomposed(a: &Decomposed, b: &Decomposed) -> Decomposed {
 ///
 /// # Panics
 ///
-/// Panics if aligning the operands would need more than 100 000 digits, which
-/// only happens for exponents far outside any practical range (`1e100000 + 1`).
+/// Panics if aligning the operands would need more than 100 000 digits
+/// (`1e100000 + 1`), or if the result's exponent falls outside the encodable
+/// range of ±(`u64::MAX - 2`). Both need exponents far outside any practical
+/// range; see the module documentation.
 ///
 /// ```rust
 /// use ordecimal::Decimal;
@@ -361,9 +379,7 @@ impl Neg for Decimal {
         if self.is_zero() {
             return self;
         }
-        let mut d = Decomposed::from_decimal(&self);
-        d.positive = !d.positive;
-        d.to_decimal()
+        -&self
     }
 }
 
@@ -371,12 +387,20 @@ impl Neg for Decimal {
 ///
 /// # Panics
 ///
-/// Same digit budget as [`Add`]: panics past 100 000 aligned digits.
+/// Same limits as [`Add`]: 100 000 aligned digits, and a result exponent within
+/// ±(`u64::MAX - 2`). Cancellation between near-equal values is what reaches the
+/// exponent floor.
 impl Sub for &Decimal {
     type Output = Decimal;
 
     fn sub(self, rhs: &Decimal) -> Decimal {
-        self + &(-rhs)
+        let a = Decomposed::from_decimal(self);
+        let mut b = Decomposed::from_decimal(rhs);
+        // Negating the decomposed operand keeps subtraction to the same two
+        // decodes and one encode as addition; going through `-rhs` would
+        // encode an intermediate `Decimal` only to decode it again.
+        b.positive = !b.positive;
+        add_decomposed(&a, &b).to_decimal()
     }
 }
 
@@ -750,8 +774,65 @@ mod tests {
     // ── Digit budget ────────────────────────────────────────────────────
 
     #[test]
+    fn add_at_digit_budget_succeeds() {
+        // Exactly MAX_DIGIT_COUNT aligned digits: the last size that works.
+        let sum = &d("1e99999") + &d("1");
+        let sci = sum.to_scientific_string();
+        let (mantissa, exponent) = sci.split_once('e').expect("scientific form");
+        assert_eq!(exponent, "99999");
+        assert_eq!(
+            mantissa.chars().filter(|c| c.is_ascii_digit()).count(),
+            MAX_DIGIT_COUNT,
+            "every digit between the two operands must survive"
+        );
+        assert_eq!(Decimal::from_bytes(sum.as_bytes()).unwrap(), sum);
+    }
+
+    #[test]
     #[should_panic(expected = "more than 100000 digits")]
     fn add_beyond_digit_budget_panics() {
         let _ = &d("1e100000") + &d("1");
+    }
+
+    // ── Exponent range ──────────────────────────────────────────────────
+
+    /// Build a value sitting at the largest encodable exponent. Such values
+    /// cannot be parsed (`FromStr` caps exponents at `i64::MAX`) but they
+    /// decode fine, which is how they reach arithmetic in practice: stored
+    /// bytes read back through `from_bytes`.
+    fn at_max_exponent(significand: &[u8], exponent_positive: bool) -> Decimal {
+        let bytes = encode_from_parts(true, exponent_positive, MAX_EXPONENT, significand);
+        Decimal::from_bytes(&bytes).expect("largest encodable exponent must decode")
+    }
+
+    #[test]
+    fn add_at_max_exponent_stays_encodable() {
+        let sum = &at_max_exponent(&[1], true) + &at_max_exponent(&[2], true);
+        assert_eq!(sum.to_scientific_string(), format!("3e{MAX_EXPONENT}"));
+        assert_eq!(Decimal::from_bytes(sum.as_bytes()).unwrap(), sum);
+    }
+
+    #[test]
+    fn sub_at_min_exponent_stays_encodable() {
+        let diff = &at_max_exponent(&[3], false) - &at_max_exponent(&[1], false);
+        assert_eq!(diff.to_scientific_string(), format!("2e-{MAX_EXPONENT}"));
+        assert_eq!(Decimal::from_bytes(diff.as_bytes()).unwrap(), diff);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the encodable range")]
+    fn add_carrying_past_max_exponent_panics() {
+        // 5e(MAX) + 5e(MAX) = 1e(MAX + 1), one place too far.
+        let a = at_max_exponent(&[5], true);
+        let _ = &a + &a;
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the encodable range")]
+    fn sub_cancelling_past_min_exponent_panics() {
+        // 1.001e-(MAX) − 1e-(MAX) = 1e-(MAX + 3), three places too far.
+        let a = at_max_exponent(&[1, 0, 0, 1], false);
+        let b = at_max_exponent(&[1], false);
+        let _ = &a - &b;
     }
 }

@@ -11,6 +11,15 @@ fn decimal_str() -> impl Strategy<Value = String> {
     (any::<i64>(), -40i32..40i32).prop_map(|(mantissa, exponent)| format!("{mantissa}e{exponent}"))
 }
 
+/// Same, but with mantissas far beyond 64 bits, so that significands span many
+/// declets and carries have to propagate across them.
+fn long_decimal_str() -> impl Strategy<Value = String> {
+    (any::<bool>(), "[0-9]{1,200}", -300i32..300i32).prop_map(|(negative, digits, exponent)| {
+        let sign = if negative { "-" } else { "" };
+        format!("{sign}{digits}e{exponent}")
+    })
+}
+
 fn ord(s: &str) -> Decimal {
     s.parse().expect("valid decimal string")
 }
@@ -85,5 +94,50 @@ proptest! {
     fn arithmetic_results_roundtrip_through_bytes(a in decimal_str(), b in decimal_str()) {
         let sum = &ord(&a) + &ord(&b);
         prop_assert_eq!(Decimal::from_bytes(sum.as_bytes()).unwrap(), sum);
+    }
+
+    /// The strong form of the above: a result must be byte-identical to the
+    /// same value parsed from its own printed form. `Eq`, `Ord` and `Hash`
+    /// compare raw bytes, so a value with two encodings would break all three.
+    #[test]
+    fn results_are_canonical_encodings(a in decimal_str(), b in decimal_str()) {
+        let sum = &ord(&a) + &ord(&b);
+        let reparsed_sum = ord(&sum.to_scientific_string());
+        prop_assert_eq!(reparsed_sum.as_bytes(), sum.as_bytes());
+
+        let difference = &ord(&a) - &ord(&b);
+        let reparsed_difference = ord(&difference.to_scientific_string());
+        prop_assert_eq!(reparsed_difference.as_bytes(), difference.as_bytes());
+    }
+
+    #[test]
+    fn addition_is_associative(a in decimal_str(), b in decimal_str(), c in decimal_str()) {
+        let (a, b, c) = (ord(&a), ord(&b), ord(&c));
+        prop_assert_eq!(&(&a + &b) + &c, &a + &(&b + &c));
+    }
+
+    // ── Long mantissas: multi-declet significands ───────────────────────
+
+    #[test]
+    fn add_matches_bigdecimal_for_long_mantissas(
+        a in long_decimal_str(),
+        b in long_decimal_str(),
+    ) {
+        assert_same_value(&(&ord(&a) + &ord(&b)), &(big(&a) + big(&b)))?;
+    }
+
+    #[test]
+    fn sub_matches_bigdecimal_for_long_mantissas(
+        a in long_decimal_str(),
+        b in long_decimal_str(),
+    ) {
+        assert_same_value(&(&ord(&a) - &ord(&b)), &(big(&a) - big(&b)))?;
+    }
+
+    #[test]
+    fn long_mantissa_results_are_canonical(a in long_decimal_str(), b in long_decimal_str()) {
+        let sum = &ord(&a) + &ord(&b);
+        let reparsed = ord(&sum.to_scientific_string());
+        prop_assert_eq!(reparsed.as_bytes(), sum.as_bytes());
     }
 }

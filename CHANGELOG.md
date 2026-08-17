@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1
+
+### Features
+
+- **Arithmetic on `Decimal`**: `Add`, `Sub`, `Neg`, `AddAssign`, `SubAssign` and `Sum`, in every operand-ownership combination (`a + b`, `&a + &b`, `a + &b`, `&a + b`). Computed with schoolbook base-10 digit arrays — no floating point, no rounding, no precision limit beyond the digit budget below
+- **`Sum` for iterators**: `values.iter().sum::<Decimal>()` and `values.into_iter().sum::<Decimal>()`; an empty iterator sums to zero
+
+### Fixes
+
+- **`encode_from_parts` no longer wraps on extreme exponents**: the `exponent + 2` gamma offset was unchecked, so an exponent above `u64::MAX - 2` panicked in debug builds and silently produced undecodable bytes in release ones. It is now range-checked in both profiles. Only reachable for values decoded from stored bytes — `FromStr` caps exponents at `i64::MAX` — and, before arithmetic existed, only by carrying past the ceiling, which nothing could do
+
+### Notes
+
+- Aligning operands with distant exponents materializes trailing zeros (`1e100 + 1` needs 101 digits). Operations are capped at 100 000 aligned digits and **panic** beyond that, like integer overflow in `std`. Unreachable for practical values — DynamoDB numbers hold at most 38 digits — but `1e100000 + 1` will panic
+- Results whose exponent would leave the encodable range of ±(`u64::MAX - 2`) also panic: a carry can push one place past the ceiling, and cancelling near-equal values one place below the floor, from operands that are themselves encodable
+- Arithmetic results are ordinary encoded values: byte order still matches numeric order, `from_bytes` round-trips them, and they are byte-identical to the same value parsed from a string
+
+### Tests
+
+- Property tests cross-checking `Add`/`Sub`/`Neg`/`Sum` against `bigdecimal`, over both 64-bit and 200-digit mantissas, plus associativity, order preservation, and canonicality of results (a result must be byte-identical to the same value parsed from a string, since `Eq`/`Ord`/`Hash` compare raw bytes)
+- Directed tests at both ends of the encodable exponent range and at the exact digit-budget boundary
+- `fuzz_arithmetic` fuzz target now runs in CI alongside the parse/decode/roundtrip targets
+
 ## 0.3.0
 
 ### Features

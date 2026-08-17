@@ -9,19 +9,39 @@ use crate::significand::encode_significand;
 /// The single encoded byte for positive zero (`10` padded to `0x80`).
 pub(crate) const POSITIVE_ZERO_BYTE: u8 = 0b1000_0000;
 
+/// Largest exponent magnitude the format can represent.
+///
+/// The gamma code stores `exponent + 2` and the decoder rejects codes with a
+/// bit count of 64 or more, so the largest representable `exponent + 2` is
+/// `u64::MAX` — leaving `u64::MAX - 2` for the exponent itself. The same bound
+/// applies to negative exponents, whose magnitude is encoded identically.
+pub(crate) const MAX_EXPONENT: u64 = u64::MAX - 2;
+
 /// Encode from semantic parts (for internal use during parsing)
+///
+/// # Panics
+///
+/// Panics if `exponent` exceeds [`MAX_EXPONENT`], which the format cannot
+/// represent. Callers are expected to have range-checked the exponent; without
+/// this check the `exponent + 2` offset below would wrap in release builds and
+/// silently produce bytes that no decoder accepts.
 pub fn encode_from_parts(
     positive: bool,
     exponent_positive: bool,
     exponent: u64,
     significand: &[u8],
 ) -> Vec<u8> {
+    // `exponent + 2` overflows exactly when `exponent > MAX_EXPONENT`.
+    let offset_exp = exponent
+        .checked_add(2)
+        .expect("ordecimal: exponent exceeds the encodable range");
+
     // Estimate capacity: sign(2 bits) + gamma(~2*log2(exp+2)+1) + significand(4 + 10*ceil((n-1)/3))
     let significand_len = significand.len();
     let exponent_bits = if exponent == 0 {
         3
     } else {
-        2 * (64 - (exponent + 2).leading_zeros()) as usize + 1
+        2 * (64 - offset_exp.leading_zeros()) as usize + 1
     };
     let significand_bits = if significand_len <= 1 {
         4
@@ -43,8 +63,7 @@ pub fn encode_from_parts(
     // Negate when s and t have OPPOSITE signs
     let negate = positive != exponent_positive;
 
-    // Build the gamma code for (exponent + 2)
-    let offset_exp = exponent + 2;
+    // Build the gamma code for (exponent + 2), range-checked above
     let n = bit_length(offset_exp);
 
     // Modified gamma code: (N-1) ones, then 0, then the remaining N-1 bits of binary

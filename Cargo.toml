@@ -11,6 +11,9 @@ keywords = ["decimal", "encoding", "order-preserving", "database", "sort-key"]
 categories = ["encoding", "database"]
 exclude = [".github/"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 serde = ["dep:serde"]
 rust_decimal = ["dep:rust_decimal"]

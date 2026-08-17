@@ -146,7 +146,7 @@ fn main() {
     let ddb38 = make_large_decimal(38);
     add_str("DynamoDB 38 digits", &ddb38);
 
-    let neg_ddb38 = format!("-{}", &ddb38);
+    let neg_ddb38 = format!("-{ddb38}");
     add_str("DynamoDB 38 digits (neg)", &neg_ddb38);
 
     // Scientific notation (DynamoDB-style)

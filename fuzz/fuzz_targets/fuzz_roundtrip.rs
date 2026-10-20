@@ -17,8 +17,9 @@ struct DecimalInput {
     integer_digits: Vec<u8>,
     /// Optional fractional part digits.
     fractional_digits: Option<Vec<u8>>,
-    /// Optional scientific notation exponent.
-    exponent: Option<i16>,
+    /// Optional scientific notation exponent. Full i64 range, so digit
+    /// exponents added on top reach past i64::MAX.
+    exponent: Option<i64>,
 }
 
 impl DecimalInput {
@@ -59,10 +60,11 @@ impl DecimalInput {
 fuzz_target!(|input: DecimalInput| {
     let s = input.to_decimal_string();
 
-    let decimal: Decimal = match s.parse() {
-        Ok(d) => d,
-        Err(_) => return, // e.g. all-zero input normalised to "0" edge cases
-    };
+    // Every generated string is well-formed and its exponent stays far inside
+    // ±(u64::MAX - 2), so a rejection is a parser bug.
+    let decimal: Decimal = s
+        .parse()
+        .unwrap_or_else(|e| panic!("generated input {s:?} failed to parse: {e}"));
 
     // to_plain_string must produce a re-parseable string
     let plain = decimal.to_plain_string();

@@ -107,6 +107,22 @@ mod tests {
     }
 
     #[test]
+    fn test_json_roundtrip_extreme_exponents() {
+        // Exponents past i64 used to serialize fine but fail to deserialize.
+        for s in [
+            "1.8e9223372036854775808",
+            "-5e18446744073709551613",
+            "1e-18446744073709551613",
+        ] {
+            let original: Decimal = s.parse().unwrap();
+            let json = serde_json::to_string(&original).unwrap();
+            let restored: Decimal = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{json} should deserialize: {e}"));
+            assert_eq!(original, restored);
+        }
+    }
+
+    #[test]
     fn test_json_rejects_special_values() {
         // These should fail since inf/nan are no longer valid
         assert!(serde_json::from_str::<Decimal>("\"inf\"").is_err());
@@ -204,5 +220,15 @@ mod tests {
         let result: Result<Decimal, _> =
             bincode::deserialize(&[0u64.to_le_bytes().as_slice(), &[]].concat());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bincode_rejects_non_canonical_bytes() {
+        // [A0, 81] decodes to 1, but 1 encodes as [A0, 80]: accepting it would
+        // give a Decimal unequal to 1 that sorts above 1.001.
+        let result: Result<Decimal, _> =
+            bincode::deserialize(&[2u64.to_le_bytes().as_slice(), &[0xA0, 0x81]].concat());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not canonical"), "{err}");
     }
 }

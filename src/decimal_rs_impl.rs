@@ -15,9 +15,12 @@ use thiserror::Error;
 /// Error returned when an [`ordecimal::Decimal`](Decimal) cannot be converted
 /// to a [`decimal_rs::Decimal`].
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecimalRsConversionError {
-    /// The ordecimal value exceeds `decimal_rs`'s representable range
-    /// (38-digit precision, scale \[-126, 130\]).
+    /// The ordecimal value is not exactly representable by `decimal_rs`:
+    /// more than 38 digits, or scale outside \[-126, 130\]. Near the top of
+    /// that range decimal_rs cannot parse its own output (`1e126`, scale
+    /// −126), so such values are reported here too.
     #[error("value {0} is outside decimal_rs::Decimal representable range")]
     OutOfRange(String),
 }
@@ -48,7 +51,7 @@ impl From<&decimal_rs::Decimal> for Decimal {
 /// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`decimal_rs::Decimal`].
 ///
 /// Fails if the ordecimal value exceeds `decimal_rs`'s 38-digit precision
-/// or scale limits.
+/// or scale limits. Never rounds: a value that would lose digits is an error.
 impl TryFrom<Decimal> for decimal_rs::Decimal {
     type Error = DecimalRsConversionError;
 
@@ -64,8 +67,12 @@ impl TryFrom<&Decimal> for decimal_rs::Decimal {
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
         let s = value.to_scientific_string();
 
+        // decimal_rs's FromStr rounds past 38 digits instead of failing;
+        // converting back catches the loss.
         s.parse::<decimal_rs::Decimal>()
-            .map_err(|_| DecimalRsConversionError::OutOfRange(s))
+            .ok()
+            .filter(|dr| Decimal::from(dr) == *value)
+            .ok_or(DecimalRsConversionError::OutOfRange(s))
     }
 }
 
@@ -163,6 +170,34 @@ mod tests {
         let od: Decimal = "1e10000".parse().unwrap();
         let result = decimal_rs::Decimal::try_from(&od);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_into_decimal_rs_rejects_precision_loss() {
+        // decimal_rs's FromStr rounds past 38 digits instead of failing, which
+        // used to return a silently rounded Ok.
+        let od: Decimal = "1.234567890123456789012345678901234567891".parse().unwrap();
+        assert!(matches!(
+            decimal_rs::Decimal::try_from(&od),
+            Err(DecimalRsConversionError::OutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn try_into_decimal_rs_exact_at_its_limits() {
+        // The exactness check must not reject what decimal_rs holds exactly.
+        let cases = [
+            "12345678901234567890123456789012345678",
+            "-99999999999999999999999999999999999999",
+            "1e-130",
+            "1.2345678901234567890123456789012345678e-93",
+            "9.9999999999999999999999999999999999999e124",
+        ];
+        for s in cases {
+            let dr: decimal_rs::Decimal = s.parse().unwrap();
+            let od = Decimal::from(&dr);
+            assert_eq!(decimal_rs::Decimal::try_from(&od), Ok(dr), "{s}");
+        }
     }
 
     #[test]

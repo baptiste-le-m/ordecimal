@@ -4,11 +4,29 @@
 //!
 //! Provides:
 //! - [`From<bigdecimal::BigDecimal>`](From) for [`Decimal`] — infallible,
-//!   since both types support arbitrary precision.
-//! - [`From<Decimal>`](From) for [`bigdecimal::BigDecimal`] — also infallible,
-//!   because `BigDecimal` can represent every ordecimal value.
+//!   since both types support arbitrary precision and ordecimal's exponent
+//!   range covers `BigDecimal`'s.
+//! - [`TryFrom<Decimal>`](TryFrom) for [`bigdecimal::BigDecimal`] — fallible,
+//!   because `BigDecimal` stores its scale as an `i64` while ordecimal's
+//!   exponent reaches ±(`u64::MAX - 2`).
 
+use crate::arithmetic::MAX_DIGIT_COUNT;
 use crate::Decimal;
+use bigdecimal::num_bigint::BigInt;
+use thiserror::Error;
+
+/// Error returned when an [`ordecimal::Decimal`](Decimal) cannot be converted
+/// to a [`bigdecimal::BigDecimal`].
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BigDecimalConversionError {
+    /// The value has no `BigDecimal` form: an exponent below about −2^63
+    /// needs a scale above `i64::MAX` (`1e-9223372036854775808`), and one
+    /// above about 2^63 needs its trailing zeros spelled out in the integer,
+    /// which is refused past 100 000 digits (the arithmetic budget).
+    #[error("value {0} is outside bigdecimal::BigDecimal representable range")]
+    OutOfRange(String),
+}
 
 /// Infallible conversion from [`bigdecimal::BigDecimal`] to [`ordecimal::Decimal`](Decimal).
 ///
@@ -33,22 +51,60 @@ impl From<&bigdecimal::BigDecimal> for Decimal {
     }
 }
 
-/// Infallible conversion from [`ordecimal::Decimal`](Decimal) to [`bigdecimal::BigDecimal`].
+/// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`bigdecimal::BigDecimal`].
 ///
-/// Both types support arbitrary precision, so every ordecimal value is
-/// representable by `BigDecimal`.
-impl From<Decimal> for bigdecimal::BigDecimal {
-    fn from(value: Decimal) -> Self {
-        bigdecimal::BigDecimal::from(&value)
+/// Every digit carries over. `BigDecimal` keeps its scale in an `i64`, so
+/// exponents beyond about ±2^63 may not fit: see
+/// [`BigDecimalConversionError::OutOfRange`].
+impl TryFrom<Decimal> for bigdecimal::BigDecimal {
+    type Error = BigDecimalConversionError;
+
+    fn try_from(value: Decimal) -> Result<Self, Self::Error> {
+        Self::try_from(&value)
     }
 }
 
-/// Infallible conversion from a borrowed [`ordecimal::Decimal`](Decimal) reference.
-impl From<&Decimal> for bigdecimal::BigDecimal {
-    fn from(value: &Decimal) -> Self {
-        let s = value.to_scientific_string();
-        s.parse()
-            .expect("ordecimal scientific notation should always be a valid BigDecimal input")
+/// Fallible conversion from a borrowed [`ordecimal::Decimal`](Decimal) reference.
+impl TryFrom<&Decimal> for bigdecimal::BigDecimal {
+    type Error = BigDecimalConversionError;
+
+    fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
+        if value.is_zero() {
+            return Ok(bigdecimal::BigDecimal::from(0));
+        }
+
+        value
+            .with_significand(|sig, parts| {
+                // value = sig × 10^(exponent − (len − 1)), and BigDecimal's
+                // scale is that power negated.
+                let exponent = if parts.exponent_positive {
+                    i128::from(parts.exponent)
+                } else {
+                    -i128::from(parts.exponent)
+                };
+                let scale = (sig.len() as i128 - 1) - exponent;
+                // A scale below i64::MIN is still reachable by moving trailing
+                // zeros into the integer, within the digit budget. One above
+                // i64::MAX is not: the significand has no trailing zeros to drop.
+                let pad = (i128::from(i64::MIN) - scale).max(0);
+                let scale = i64::try_from(scale + pad).ok()?;
+                let pad = usize::try_from(pad).ok().filter(|&p| {
+                    sig.len()
+                        .checked_add(p)
+                        .is_some_and(|n| n <= MAX_DIGIT_COUNT)
+                })?;
+
+                let mut digits = String::with_capacity(1 + sig.len() + pad);
+                if !parts.positive {
+                    digits.push('-');
+                }
+                digits.push_str(sig);
+                digits.extend(std::iter::repeat('0').take(pad));
+                let int: BigInt = digits.parse().ok()?;
+                Some(bigdecimal::BigDecimal::new(int, scale))
+            })
+            .flatten()
+            .ok_or_else(|| BigDecimalConversionError::OutOfRange(value.to_scientific_string()))
     }
 }
 
@@ -124,6 +180,72 @@ mod tests {
     }
 
     #[test]
+    fn from_bigdecimal_extreme_scales() {
+        // Scale i64::MIN is exponent 2^63, one past i64::MAX: it used to fail
+        // ordecimal's parser and panic in this infallible conversion.
+        let cases = [
+            (1, i64::MIN, "1e9223372036854775808"),
+            (10, -i64::MAX, "1e9223372036854775808"),
+            (1, i64::MAX, "1e-9223372036854775807"),
+        ];
+        for (int, scale, expected) in cases {
+            let bd = bigdecimal::BigDecimal::new(BigInt::from(int), scale);
+            assert_eq!(Decimal::from(&bd).to_scientific_string(), expected);
+        }
+    }
+
+    #[test]
+    fn roundtrip_bigdecimal_at_min_scale() {
+        // Scale i64::MIN with trailing zeros in the integer: the shortest
+        // scientific form needs a scale below i64::MIN, so the way back has
+        // to move those zeros into the integer again.
+        let cases = [
+            bigdecimal::BigDecimal::from_str("1.0e9223372036854775809").unwrap(),
+            bigdecimal::BigDecimal::new(
+                BigInt::from_str("123456789012345678901234567890").unwrap(),
+                i64::MIN,
+            ),
+        ];
+        for bd in cases {
+            let od = Decimal::from(&bd);
+            let back = bigdecimal::BigDecimal::try_from(&od)
+                .unwrap_or_else(|e| panic!("{bd:?} should convert back: {e}"));
+            assert_eq!(back, bd);
+        }
+    }
+
+    #[test]
+    fn try_into_bigdecimal_padding_within_digit_budget() {
+        // 2^63 + 99 999: scale i64::MIN plus 99 999 padding zeros, 100 000
+        // digits in all — the last exponent that fits the budget.
+        let od: Decimal = "1e9223372036854875807".parse().unwrap();
+        let bd = bigdecimal::BigDecimal::try_from(&od).unwrap();
+        assert_eq!(bd.as_bigint_and_exponent().1, i64::MIN);
+        assert_eq!(Decimal::from(&bd), od);
+        let od: Decimal = "1e9223372036854875808".parse().unwrap();
+        assert!(matches!(
+            bigdecimal::BigDecimal::try_from(&od),
+            Err(BigDecimalConversionError::OutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn try_into_bigdecimal_beyond_i64_scale_rejected() {
+        // The first needs scale 2^63, above i64::MAX, and used to panic in what
+        // was an infallible From; the second would need ~9.2e18 padding digits.
+        for s in ["1e-9223372036854775808", "1e18446744073709551613"] {
+            let od: Decimal = s.parse().unwrap();
+            assert!(
+                matches!(
+                    bigdecimal::BigDecimal::try_from(&od),
+                    Err(BigDecimalConversionError::OutOfRange(_))
+                ),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
     fn from_bigdecimal_ref() {
         let bd = bigdecimal::BigDecimal::from_str("3.14").unwrap();
         let od = Decimal::from(&bd);
@@ -136,7 +258,7 @@ mod tests {
     #[test]
     fn into_bigdecimal_positive() {
         let od: Decimal = "123.456".parse().unwrap();
-        let bd = bigdecimal::BigDecimal::from(&od);
+        let bd = bigdecimal::BigDecimal::try_from(&od).unwrap();
         let expected = bigdecimal::BigDecimal::from_str("123.456").unwrap();
         assert_eq!(bd, expected);
     }
@@ -144,7 +266,7 @@ mod tests {
     #[test]
     fn into_bigdecimal_negative() {
         let od: Decimal = "-42.5".parse().unwrap();
-        let bd = bigdecimal::BigDecimal::from(&od);
+        let bd = bigdecimal::BigDecimal::try_from(&od).unwrap();
         let expected = bigdecimal::BigDecimal::from_str("-42.5").unwrap();
         assert_eq!(bd, expected);
     }
@@ -152,14 +274,14 @@ mod tests {
     #[test]
     fn into_bigdecimal_zero() {
         let od = Decimal::zero();
-        let bd = bigdecimal::BigDecimal::from(&od);
+        let bd = bigdecimal::BigDecimal::try_from(&od).unwrap();
         assert_eq!(bd, bigdecimal::BigDecimal::from(0));
     }
 
     #[test]
     fn into_bigdecimal_owned() {
         let od: Decimal = "99".parse().unwrap();
-        let bd = bigdecimal::BigDecimal::from(od);
+        let bd = bigdecimal::BigDecimal::try_from(od).unwrap();
         let expected = bigdecimal::BigDecimal::from(99);
         assert_eq!(bd, expected);
     }
@@ -183,7 +305,7 @@ mod tests {
         for s in &values {
             let bd_original = bigdecimal::BigDecimal::from_str(s).unwrap();
             let od = Decimal::from(&bd_original);
-            let bd_restored = bigdecimal::BigDecimal::from(&od);
+            let bd_restored = bigdecimal::BigDecimal::try_from(&od).unwrap();
             assert_eq!(
                 bd_original, bd_restored,
                 "roundtrip failed for {s}: {bd_original} != {bd_restored}"
@@ -197,7 +319,7 @@ mod tests {
 
         for s in &values {
             let od_original: Decimal = s.parse().unwrap();
-            let bd = bigdecimal::BigDecimal::from(&od_original);
+            let bd = bigdecimal::BigDecimal::try_from(&od_original).unwrap();
             let od_restored = Decimal::from(&bd);
             assert_eq!(
                 od_original,

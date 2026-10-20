@@ -19,6 +19,10 @@ pub(crate) const MAX_EXPONENT: u64 = u64::MAX - 2;
 
 /// Encode from semantic parts (for internal use during parsing)
 ///
+/// `significand` must have no leading or trailing zeros: the decoder rejects
+/// any encoding that ends in a zero declet, since it would be a second byte
+/// form of a value that Eq/Ord/Hash compare by bytes.
+///
 /// # Panics
 ///
 /// Panics if `exponent` exceeds [`MAX_EXPONENT`], which the format cannot
@@ -31,6 +35,11 @@ pub fn encode_from_parts(
     exponent: u64,
     significand: &[u8],
 ) -> Vec<u8> {
+    debug_assert!(
+        significand.first().is_some_and(|&d| d != 0) && significand.last().is_some_and(|&d| d != 0),
+        "ordecimal: significand must have no leading or trailing zeros"
+    );
+
     // `exponent + 2` overflows exactly when `exponent > MAX_EXPONENT`.
     let offset_exp = exponent
         .checked_add(2)

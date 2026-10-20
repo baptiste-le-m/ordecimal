@@ -19,6 +19,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.73
+      - uses: Swatinem/rust-cache@v2
+      # Cargo 1.73 cannot read the v4 lockfile: re-resolve with stable cargo,
+      # preferring dependency versions that support the MSRV, and write it in
+      # the v3 format (identical for registry-only dependencies).
+      - run: CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +stable generate-lockfile
+      - run: sed -i 's/^version = 4$/version = 3/' Cargo.lock
+      # Library only: dev-dependencies (criterion, proptest) need newer Rust.
+      - run: cargo +1.73 check --lib --locked
+      - run: cargo +1.73 check --lib --all-features --locked
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

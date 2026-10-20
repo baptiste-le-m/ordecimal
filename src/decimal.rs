@@ -1,5 +1,5 @@
 use crate::decoder::{decode_to_buf, decode_to_parts, DecodedParts};
-use crate::encoder::{encode_from_parts, POSITIVE_ZERO_BYTE};
+use crate::encoder::{encode_from_parts, MAX_EXPONENT, POSITIVE_ZERO_BYTE};
 use crate::error::{DecodeError, EncodeError, EncodeResult};
 use std::cmp::Ordering;
 use std::fmt;
@@ -24,6 +24,14 @@ pub struct Decimal {
 
 impl Decimal {
     /// Create from pre-encoded bytes without validation
+    ///
+    /// `bytes` must be a canonical encoding, such as one returned by
+    /// [`as_bytes`](Self::as_bytes) or accepted by [`from_bytes`](Self::from_bytes).
+    /// Anything else is memory-safe but meaningless: formatting yields
+    /// `"<invalid>"`, conversions return errors, arithmetic panics, and
+    /// comparisons follow the raw bytes. That includes non-canonical bytes
+    /// that decode to a number, such as `[0xA0, 0x81]`, which 0.3 still
+    /// treated as 1.
     #[must_use]
     pub const fn from_bytes_unchecked(bytes: Vec<u8>) -> Self {
         Self { bytes }
@@ -35,7 +43,9 @@ impl Decimal {
     ///
     /// Returns [`DecodeError`] if the bytes do not represent a valid encoding.
     /// Byte patterns that previously encoded special values (±∞, NaN, −0) are
-    /// now rejected.
+    /// now rejected, and so is any non-canonical form of a number
+    /// ([`DecodeError::NonCanonical`]): since `Eq`, `Ord` and `Hash` compare
+    /// bytes, every value is accepted under exactly one byte string.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         // Single-byte 0x80 is positive zero — the only valid single-byte encoding.
         if bytes == [POSITIVE_ZERO_BYTE] {
@@ -115,7 +125,9 @@ impl Decimal {
         // Handle scientific notation: split on 'e' or 'E'
         // e.g. "1.5e10" → coefficient "1.5", sci_exp = +10
         //      "3E-4"   → coefficient "3",   sci_exp = -4
-        let (coeff_str, sci_exp): (&str, i64) =
+        // The exponent is read as i128 because the format encodes magnitudes up
+        // to MAX_EXPONENT (u64::MAX - 2), past what i64 holds.
+        let (coeff_str, sci_exp): (&str, i128) =
             if let Some(e_pos) = s.bytes().position(|b| b == b'e' || b == b'E') {
                 let coeff = &s[..e_pos];
                 let exp_str = &s[e_pos + 1..];
@@ -124,21 +136,13 @@ impl Decimal {
                         "invalid scientific notation".to_string(),
                     ));
                 }
-                let exp: i64 = exp_str.parse().map_err(|_| {
+                let exp: i128 = exp_str.parse().map_err(|_| {
                     EncodeError::InvalidFormat(format!("invalid exponent: {exp_str}"))
                 })?;
                 (coeff, exp)
             } else {
                 (s, 0)
             };
-
-        // Handle zero — map both +0 and -0 to positive zero
-        if coeff_str == "0"
-            || coeff_str == "0.0"
-            || coeff_str.bytes().all(|b| b == b'0' || b == b'.')
-        {
-            return Ok(Self::zero());
-        }
 
         // Parse the coefficient - split without allocation
         let (integer_part, fractional_part) = match coeff_str.find('.') {
@@ -164,6 +168,14 @@ impl Decimal {
             }
         }
 
+        // The digit check above ran over the whole input, so a lone "." still
+        // gets here when the only digits sit in the exponent (".e5").
+        if integer_part.is_empty() && fractional_part.is_empty() {
+            return Err(EncodeError::InvalidFormat(
+                "coefficient contains no digits".to_string(),
+            ));
+        }
+
         // Count leading zeros in the concatenated digit stream (integer_part ++ fractional_part)
         let leading_zeros = integer_part
             .bytes()
@@ -171,8 +183,13 @@ impl Decimal {
             .take_while(|&b| b == b'0')
             .count();
 
-        // Count trailing zeros in the concatenated digit stream
         let total_len = integer_part.len() + fractional_part.len();
+        if leading_zeros == total_len {
+            // All digits were zero — map to positive zero regardless of sign
+            return Ok(Self::zero());
+        }
+
+        // Count trailing zeros in the concatenated digit stream
         let trailing_zeros = fractional_part
             .bytes()
             .rev()
@@ -181,10 +198,6 @@ impl Decimal {
             .count();
 
         let significant_len = total_len - leading_zeros - trailing_zeros;
-        if significant_len == 0 {
-            // All digits were zero — map to positive zero regardless of sign
-            return Ok(Self::zero());
-        }
 
         // Calculate the raw exponent from the position of the decimal point
         // relative to the first significant digit, then adjust by sci_exp.
@@ -194,23 +207,28 @@ impl Decimal {
         //   coefficient = d0.d1d2... × 10^raw_exp
         // For integer part with significant digits: raw_exp = len(integer_significant) - 1
         // For purely fractional (0.00x...): raw_exp = -(leading_zeros_in_frac + 1)
-        let raw_exp: i64 = if decimal_point_position > 0 {
-            (decimal_point_position as i64) - 1
+        let raw_exp: i128 = if decimal_point_position > 0 {
+            (decimal_point_position as i128) - 1
         } else {
             let frac_leading_zeros =
                 fractional_part.len() - fractional_part.trim_start_matches('0').len();
-            -((frac_leading_zeros as i64) + 1)
+            -((frac_leading_zeros as i128) + 1)
         };
 
-        // Apply the scientific notation exponent offset
-        let final_exp = raw_exp + sci_exp;
+        // Apply the scientific notation exponent offset. A magnitude past
+        // MAX_EXPONENT has no encoding: wrapping it would sort the value in
+        // the wrong place, so refuse it.
+        let final_exp = raw_exp
+            .checked_add(sci_exp)
+            .filter(|e| e.unsigned_abs() <= u128::from(MAX_EXPONENT))
+            .ok_or_else(|| {
+                EncodeError::InvalidFormat(format!(
+                    "exponent outside the encodable range of ±{MAX_EXPONENT}"
+                ))
+            })?;
 
-        #[allow(clippy::cast_sign_loss)]
-        let (exponent, exponent_positive) = if final_exp >= 0 {
-            (final_exp as u64, true)
-        } else {
-            (final_exp.unsigned_abs(), false)
-        };
+        #[allow(clippy::cast_possible_truncation)]
+        let (exponent, exponent_positive) = (final_exp.unsigned_abs() as u64, final_exp >= 0);
 
         // Encode significand using a stack buffer when possible (covers all
         // DynamoDB numbers ≤ 38 digits), falling back to a Vec for very large
@@ -270,57 +288,50 @@ impl Decimal {
             return "0".to_string();
         }
 
-        // Try decoding to a stack buffer first (no heap allocation for ≤1536
-        // significant digits, which covers all practical use cases).
-        let mut sig_buf = [0u8; 1536];
-        match decode_to_buf(&self.bytes, &mut sig_buf) {
-            Ok(parts) => {
-                let sig_end = sig_buf[..parts.sig_len]
-                    .iter()
-                    .rposition(|&x| x != 0)
-                    .map_or(1, |p| p + 1);
-                for b in &mut sig_buf[..sig_end] {
-                    *b += b'0';
-                }
-                // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', valid ASCII
-                let sig = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
-                Self::format_plain_or_scientific(sig, &parts)
-            }
-            // Stack buffer too small — fall back to heap-based decode
-            Err(_) => self.to_plain_string_heap(),
-        }
+        self.with_significand(Self::format_plain_or_scientific)
+            .unwrap_or_else(|| "<invalid>".to_string())
     }
 
-    /// Heap-based fallback for `to_plain_string` when the significand exceeds
-    /// the 1536-byte stack buffer.
-    fn to_plain_string_heap(&self) -> String {
-        let decoded = match decode_to_parts(&self.bytes) {
-            Ok(d) => d,
-            Err(_) => return "<invalid>".to_string(),
+    /// Decode the significand to ASCII digits, trailing zeros stripped, and
+    /// hand it to `f` along with the sign and exponent.
+    ///
+    /// Decodes into a 1536-byte stack buffer when the significand fits (up to
+    /// 1534 digits, which covers every practical value), and on the heap
+    /// otherwise. Returns `None` if the bytes are not a valid encoding, which
+    /// only [`from_bytes_unchecked`](Self::from_bytes_unchecked) can produce.
+    pub(crate) fn with_significand<R>(
+        &self,
+        f: impl FnOnce(&str, &DecodedParts) -> R,
+    ) -> Option<R> {
+        let mut stack_buf = [0u8; 1536];
+        let mut heap_buf;
+        let (digits, parts) = match decode_to_buf(&self.bytes, &mut stack_buf) {
+            Ok(parts) => (&mut stack_buf[..parts.sig_len], parts),
+            Err(DecodeError::BufferTooShort { .. }) => {
+                let decoded = decode_to_parts(&self.bytes).ok()?;
+                let parts = DecodedParts {
+                    positive: decoded.positive,
+                    exponent_positive: decoded.exponent_positive,
+                    exponent: decoded.exponent,
+                    sig_len: decoded.significand.len(),
+                };
+                heap_buf = decoded.significand;
+                (&mut heap_buf[..], parts)
+            }
+            Err(_) => return None,
         };
 
-        let sig_end = decoded
-            .significand
-            .iter()
-            .rposition(|&x| x != 0)
-            .map_or(1, |p| p + 1);
-        let mut sig_vec: Vec<u8> = decoded.significand[..sig_end].to_vec();
-        for b in &mut sig_vec {
+        let sig_end = digits.iter().rposition(|&x| x != 0).map_or(1, |p| p + 1);
+        let digits = &mut digits[..sig_end];
+        for b in digits.iter_mut() {
             *b += b'0';
         }
         // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', valid ASCII
-        let sig = unsafe { std::str::from_utf8_unchecked(&sig_vec) };
-
-        let parts = DecodedParts {
-            positive: decoded.positive,
-            exponent_positive: decoded.exponent_positive,
-            exponent: decoded.exponent,
-            sig_len: decoded.significand.len(),
-        };
-        Self::format_plain_or_scientific(sig, &parts)
+        let sig = unsafe { std::str::from_utf8_unchecked(digits) };
+        Some(f(sig, &parts))
     }
 
-    /// Core formatting logic shared by stack-buffer and heap-buffer paths.
+    /// Positional formatting for `to_plain_string`, scientific past `MAX_PLAIN_EXPONENT`.
     fn format_plain_or_scientific(sig: &str, parts: &DecodedParts) -> String {
         let mut out = String::with_capacity(sig.len() + 8);
         if !parts.positive {
@@ -380,35 +391,14 @@ impl Decimal {
             return "0e0".to_string();
         }
 
-        let decoded = match decode_to_parts(&self.bytes) {
-            Ok(d) => d,
-            Err(_) => return "<invalid>".to_string(),
-        };
-
-        let sig_end = decoded
-            .significand
-            .iter()
-            .rposition(|&x| x != 0)
-            .map_or(1, |p| p + 1);
-
-        let mut sig_vec: Vec<u8> = decoded.significand[..sig_end].to_vec();
-
-        for b in &mut sig_vec {
-            *b += b'0';
-        }
-        let sig = unsafe { std::str::from_utf8_unchecked(&sig_vec) };
-
-        let parts = DecodedParts {
-            positive: decoded.positive,
-            exponent_positive: decoded.exponent_positive,
-            exponent: decoded.exponent,
-            sig_len: decoded.significand.len(),
-        };
-        let mut out = String::with_capacity(sig.len() + 8);
-        if !parts.positive {
-            out.push('-');
-        }
-        Self::format_scientific(&mut out, sig, &parts)
+        self.with_significand(|sig, parts| {
+            let mut out = String::with_capacity(sig.len() + 8);
+            if !parts.positive {
+                out.push('-');
+            }
+            Self::format_scientific(&mut out, sig, parts)
+        })
+        .unwrap_or_else(|| "<invalid>".to_string())
     }
 
     /// Format as `d.dddeSIGNexp` into the already-sign-prefixed `out` buffer.
@@ -458,52 +448,34 @@ impl fmt::Display for Decimal {
             return f.write_str("0");
         }
 
-        // Decode to stack buffer — no heap allocation for significand
-        let mut sig_buf = [0u8; 1536];
-        let parts = match decode_to_buf(&self.bytes, &mut sig_buf) {
-            Ok(p) => p,
-            Err(_) => return f.write_str("<invalid>"),
-        };
+        self.with_significand(|sig_str, parts| {
+            // Write sign
+            if !parts.positive {
+                f.write_str("-")?;
+            }
 
-        // Strip trailing zeros from significand padding
-        let sig_end = sig_buf[..parts.sig_len]
-            .iter()
-            .rposition(|&x| x != 0)
-            .map_or(1, |p| p + 1);
+            // Write "d.ddd" — first digit, decimal point, remaining digits
+            f.write_str(&sig_str[..1])?;
+            f.write_str(".")?;
+            if sig_str.len() > 1 {
+                f.write_str(&sig_str[1..])?;
+            } else {
+                f.write_str("0")?;
+            }
 
-        // Convert digit values to ASCII in-place
-        for b in &mut sig_buf[..sig_end] {
-            *b += b'0';
-        }
+            // Write " × 10^"
+            f.write_str(" \u{00d7} 10^")?;
+            if !parts.exponent_positive {
+                f.write_str("-")?;
+            }
 
-        // Write sign
-        if !parts.positive {
-            f.write_str("-")?;
-        }
-
-        // SAFETY: digit values 0–9 + b'0' = b'0'..=b'9', all valid ASCII/UTF-8
-        let sig_str = unsafe { std::str::from_utf8_unchecked(&sig_buf[..sig_end]) };
-
-        // Write "d.ddd" — first digit, decimal point, remaining digits
-        f.write_str(&sig_str[..1])?;
-        f.write_str(".")?;
-        if sig_end > 1 {
-            f.write_str(&sig_str[1..])?;
-        } else {
-            f.write_str("0")?;
-        }
-
-        // Write " × 10^"
-        f.write_str(" \u{00d7} 10^")?;
-        if !parts.exponent_positive {
-            f.write_str("-")?;
-        }
-
-        // Format exponent without write! macro overhead
-        let mut exp_buf = [0u8; 20];
-        let (start, end) = fmt_u64(parts.exponent, &mut exp_buf);
-        // SAFETY: digits are b'0'..=b'9', valid ASCII
-        f.write_str(unsafe { std::str::from_utf8_unchecked(&exp_buf[start..end]) })
+            // Format exponent without write! macro overhead
+            let mut exp_buf = [0u8; 20];
+            let (start, end) = fmt_u64(parts.exponent, &mut exp_buf);
+            // SAFETY: digits are b'0'..=b'9', valid ASCII
+            f.write_str(unsafe { std::str::from_utf8_unchecked(&exp_buf[start..end]) })
+        })
+        .unwrap_or_else(|| f.write_str("<invalid>"))
     }
 }
 
@@ -905,6 +877,132 @@ mod tests {
         assert!("+.".parse::<Decimal>().is_err(), "'+.' should fail");
         // Whitespace only
         assert!("   ".parse::<Decimal>().is_err(), "whitespace should fail");
+    }
+
+    #[test]
+    fn test_malformed_zero_coefficients_rejected() {
+        // Regression (#10): the zero shortcut used to run before the coefficient
+        // was validated, so any mix of `0` and `.` parsed as zero.
+        for input in ["0..0", "0.0.0", "00.00.00e1", ".e5", "-.e1", "+.E-3"] {
+            assert!(input.parse::<Decimal>().is_err(), "{input:?} should fail");
+        }
+    }
+
+    #[test]
+    fn test_well_formed_zero_coefficients_still_zero() {
+        for input in ["0.", ".0", "-0", "0e5", "-0.0e-3", "000.000"] {
+            let d: Decimal = input
+                .parse()
+                .unwrap_or_else(|e| panic!("{input:?} should parse: {e}"));
+            assert!(d.is_zero(), "{input:?} should be zero");
+        }
+    }
+
+    // =========================================================================
+    // Exponent range tests
+    // =========================================================================
+
+    #[test]
+    fn test_exponent_past_i64_parses_in_order() {
+        // Regression (#9): `raw_exp + sci_exp` used to wrap past i64::MAX, so
+        // these values encoded with a wrapped exponent and sorted out of place.
+        let one: Decimal = "1".parse().unwrap();
+        let minus_one: Decimal = "-1".parse().unwrap();
+
+        let big: Decimal = "10e9223372036854775807".parse().unwrap();
+        assert_eq!(big.to_scientific_string(), "1e9223372036854775808");
+        assert!(big > one);
+
+        let neg_big: Decimal = "-10e9223372036854775807".parse().unwrap();
+        assert_eq!(neg_big.to_scientific_string(), "-1e9223372036854775808");
+        assert!(neg_big < minus_one);
+
+        let tiny: Decimal = "0.01e-9223372036854775807".parse().unwrap();
+        assert_eq!(tiny.to_scientific_string(), "1e-9223372036854775809");
+        assert!(Decimal::zero() < tiny && tiny < one);
+
+        let big: Decimal = "123e9223372036854775806".parse().unwrap();
+        assert_eq!(big.to_scientific_string(), "1.23e9223372036854775808");
+    }
+
+    #[test]
+    fn test_exponent_range_boundaries() {
+        // ±(u64::MAX - 2) is the largest exponent magnitude the format encodes,
+        // whether it comes from the `e` part, the digits, or both.
+        let encodable = [
+            "1e18446744073709551613",
+            "-1e18446744073709551613",
+            "1e-18446744073709551613",
+            "10e18446744073709551612",
+            "0.1e-18446744073709551612",
+        ];
+        for input in encodable {
+            let d: Decimal = input
+                .parse()
+                .unwrap_or_else(|e| panic!("{input:?} should parse: {e}"));
+            assert_eq!(Decimal::from_bytes(d.as_bytes()).unwrap(), d, "{input:?}");
+            let sci: Decimal = d.to_scientific_string().parse().unwrap();
+            assert_eq!(sci, d, "{input:?}: to_scientific_string must round-trip");
+            let plain: Decimal = d.to_plain_string().parse().unwrap();
+            assert_eq!(plain, d, "{input:?}: to_plain_string must round-trip");
+        }
+
+        let out_of_range = [
+            "1e18446744073709551614",
+            "-1e-18446744073709551614",
+            "10e18446744073709551613",
+            "0.01e-18446744073709551612",
+            // Overflows i128 itself once the digit exponent is added.
+            "10e170141183460469231731687303715884105727",
+            "0.1e-170141183460469231731687303715884105728",
+        ];
+        for input in out_of_range {
+            assert!(
+                matches!(input.parse::<Decimal>(), Err(EncodeError::InvalidFormat(_))),
+                "{input:?} should be rejected as out of range"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_ignores_exponent_range() {
+        // Zero has no exponent to encode, so the range check does not apply;
+        // the exponent must still parse as an i128.
+        let d: Decimal = "0e18446744073709551615".parse().unwrap();
+        assert!(d.is_zero());
+    }
+
+    // =========================================================================
+    // Display tests
+    // =========================================================================
+
+    #[test]
+    fn test_display_significand_beyond_stack_buffer() {
+        // 1535+ digits overflow the stack buffer; Display used to print
+        // "<invalid>" instead of falling back to a heap decode.
+        for len in [1534, 1535, 2000] {
+            let digits = "1".repeat(len);
+            let shown = format!("1.{} \u{00d7} 10^{}", &digits[1..], len - 1);
+            let d: Decimal = digits.parse().unwrap();
+            assert_eq!(d.to_string(), shown, "{len} digits");
+            let d: Decimal = format!("-{digits}").parse().unwrap();
+            assert_eq!(d.to_string(), format!("-{shown}"), "-{len} digits");
+        }
+    }
+
+    #[test]
+    fn test_display_invalid_unchecked_bytes() {
+        // Sign `10`, then a run of exactly 64 ones: rebuilding the exponent
+        // would shift a u64 by 64, which panicked in debug builds.
+        let mut bytes = vec![0xBF];
+        bytes.extend([0xFF; 7]);
+        bytes.push(0xC0);
+        bytes.extend([0x00; 9]);
+        bytes.push(0x10);
+        let d = Decimal::from_bytes_unchecked(bytes);
+        assert_eq!(d.to_string(), "<invalid>");
+        assert_eq!(d.to_plain_string(), "<invalid>");
+        assert_eq!(d.to_scientific_string(), "<invalid>");
     }
 
     // =========================================================================

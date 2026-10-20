@@ -27,6 +27,9 @@ let d = Decimal::from_bytes(key).unwrap();
 assert_eq!(c, d);
 ```
 
+`from_bytes` accepts only the exact bytes the encoder produces, so equal
+values always have equal bytes and byte order stays numeric order.
+
 ## How it works
 
 The encoding uses a STEM format (Sign, exponent sign (**T**), **E**xponent, **M**antissa):
@@ -114,8 +117,7 @@ order.
 Two limits panic, the same way integer overflow panics in `std`. Operands with
 distant exponents have to be aligned with trailing zeros (`1e100 + 1` needs 101
 digits); that alignment is capped at 100 000 digits. And a result whose exponent
-leaves the encodable range of ±(`u64::MAX - 2`) — reachable only from stored
-bytes, since parsing caps exponents at `i64::MAX` — has no representation at all.
+leaves the encodable range of ±(`u64::MAX - 2`) has no representation at all.
 Practical values never come close to either.
 
 ## Serde
@@ -123,7 +125,7 @@ Practical values never come close to either.
 Enable the `serde` feature for `Serialize` / `Deserialize`:
 
 ```toml
-ordecimal = { version = "0.3", features = ["serde"] }
+ordecimal = { version = "0.4", features = ["serde"] }
 ```
 
 Decimals serialize as their string representation in human-readable formats (JSON, TOML)
@@ -134,7 +136,7 @@ and as raw bytes in binary formats (bincode).
 Each integration is behind a feature flag:
 
 ```toml
-ordecimal = { version = "0.3", features = ["rust_decimal", "bigdecimal", "decimal_rs", "num_bigint"] }
+ordecimal = { version = "0.4", features = ["rust_decimal", "bigdecimal", "decimal_rs", "num_bigint"] }
 ```
 
 ### `rust_decimal`
@@ -149,21 +151,23 @@ use ordecimal::Decimal;
 let rd = rust_decimal::Decimal::new(123_456, 3); // 123.456
 let od = Decimal::from(rd);
 
-// ordecimal → rust_decimal (fallible — rejects out-of-range values)
+// ordecimal → rust_decimal (fallible — rejects values it can't hold exactly)
 let rd_back = rust_decimal::Decimal::try_from(&od).unwrap();
 ```
 
 ### `bigdecimal`
 
 Convert between `ordecimal::Decimal` and [`bigdecimal::BigDecimal`](https://docs.rs/bigdecimal).
-Both types support arbitrary precision, so conversions are **infallible in both directions**:
+Both types support arbitrary precision, so every digit carries over. `BigDecimal`
+stores its scale as an `i64`, though, so the way back is fallible for exponents
+beyond about ±2^63:
 
 ```rust
 use ordecimal::Decimal;
 
 let bd = bigdecimal::BigDecimal::from(42);
 let od = Decimal::from(bd);
-let bd_back = bigdecimal::BigDecimal::from(&od);
+let bd_back = bigdecimal::BigDecimal::try_from(&od).unwrap();
 ```
 
 ### `decimal_rs`
@@ -177,7 +181,7 @@ use ordecimal::Decimal;
 let dr = decimal_rs::Decimal::from(42_i64);
 let od = Decimal::from(dr);
 
-// ordecimal → decimal_rs (fallible — rejects out-of-range values)
+// ordecimal → decimal_rs (fallible — rejects values it can't hold exactly)
 let dr_back = decimal_rs::Decimal::try_from(&od).unwrap();
 ```
 
@@ -196,6 +200,9 @@ let od = Decimal::from(bi);
 // ordecimal → BigInt (fallible — rejects fractional values)
 let bi_back = BigInt::try_from(&od).unwrap();
 ```
+
+Integers longer than 100 000 digits (`1e100000`) are rejected with
+`BigIntConversionError::TooLarge` rather than materialized.
 
 ## Reference
 

@@ -131,8 +131,9 @@ fn compute_complement_in_place(digits: &mut [u8]) {
 /// # Errors
 ///
 /// Returns [`DecodeError::BufferTooShort`] if the significand has more digits
-/// than `buf` can hold, or other [`DecodeError`] variants if the reader runs
-/// out of bits or encounters invalid tetrade/declet values.
+/// than `buf` can hold, [`DecodeError::NonCanonical`] if the significand is
+/// not in the form the encoder produces, or other [`DecodeError`] variants if
+/// the reader runs out of bits or encounters invalid tetrade/declet values.
 pub fn decode_significand_to_buf(
     reader: &mut BitReader,
     negative: bool,
@@ -149,6 +150,7 @@ pub fn decode_significand_to_buf(
     }
     buf[0] = first_tetrade;
     let mut pos = 1;
+    let mut last_declet = None;
 
     while reader.remaining_bits() >= 10 {
         if pos + 2 >= buf.len() {
@@ -169,6 +171,17 @@ pub fn decode_significand_to_buf(
             buf[pos + 2] = (declet % 10) as u8;
         }
         pos += 3;
+        last_declet = Some(declet);
+    }
+
+    // The encoder strips trailing zeros and pads only to the next byte, so its
+    // output ends in a non-zero declet followed by fewer than 8 zero bits. Any
+    // other tail decodes to the same number under different bytes, and since
+    // Eq/Ord/Hash compare bytes, such a value would be unequal to its
+    // canonical twin and could sort out of place.
+    let padding = reader.remaining_bits();
+    if last_declet == Some(0) || padding >= 8 || reader.read_bits(padding)? != 0 {
+        return Err(DecodeError::NonCanonical);
     }
 
     if negative {
@@ -191,68 +204,15 @@ pub fn decode_significand_to_buf(
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] if the reader runs out of bits or encounters
-/// invalid tetrade/declet values.
+/// Returns [`DecodeError`] if the reader runs out of bits, encounters
+/// invalid tetrade/declet values, or finds a non-canonical tail
+/// ([`DecodeError::NonCanonical`]; see [`decode_significand_to_buf`]).
 pub fn decode_significand(reader: &mut BitReader, negative: bool) -> DecodeResult<Vec<u8>> {
-    // Read first digit (tetrade - 4 bits)
-    if !reader.has_bits() {
-        return Err(DecodeError::UnexpectedEndOfInput);
-    }
-
-    // Pre-allocate: 1 tetrade digit + 3 digits per declet
-    let remaining = reader.remaining_bits();
-    let num_declets = remaining.saturating_sub(4) / 10;
-    let mut digits = Vec::with_capacity(1 + num_declets * 3);
-
-    #[allow(clippy::cast_possible_truncation)]
-    let first_tetrade = reader.read_bits(4)? as u8;
-    if first_tetrade > 9 {
-        return Err(DecodeError::InvalidTetrade(first_tetrade));
-    }
-
-    digits.push(first_tetrade);
-
-    // Read remaining digits as declets (10 bits each)
-    while reader.remaining_bits() >= 10 {
-        #[allow(clippy::cast_possible_truncation)]
-        let declet = reader.read_bits(10)? as u16;
-        if declet > 999 {
-            return Err(DecodeError::InvalidDeclet(declet));
-        }
-
-        // Convert declet to 3 digits
-        #[allow(clippy::cast_possible_truncation)]
-        let d1 = (declet / 100) as u8;
-        #[allow(clippy::cast_possible_truncation)]
-        let d2 = ((declet / 10) % 10) as u8;
-        #[allow(clippy::cast_possible_truncation)]
-        let d3 = (declet % 10) as u8;
-
-        digits.push(d1);
-        digits.push(d2);
-        digits.push(d3);
-    }
-
-    // For negative numbers, reverse the complement in-place: original = 10 - encoded
-    if negative {
-        compute_complement_in_place(&mut digits);
-    }
-
-    // Validate significand is in range [1, 10)
-    if digits.is_empty() {
-        return Err(DecodeError::InvalidSignificand(
-            "empty significand".to_string(),
-        ));
-    }
-
-    // First digit must be 1-9
-    if digits[0] == 0 || digits[0] > 9 {
-        return Err(DecodeError::InvalidSignificand(format!(
-            "first digit is {}",
-            digits[0]
-        )));
-    }
-
+    // Size the buffer exactly: 1 tetrade digit + 3 digits per declet
+    let num_declets = reader.remaining_bits().saturating_sub(4) / 10;
+    let mut digits = vec![0u8; 1 + num_declets * 3];
+    let len = decode_significand_to_buf(reader, negative, &mut digits)?;
+    digits.truncate(len);
     Ok(digits)
 }
 

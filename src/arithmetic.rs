@@ -23,9 +23,7 @@
 //! past the floor (`1.001e-(MAX) - 1e-(MAX)`), from operands that are themselves
 //! perfectly encodable. Such results have no representation, so they panic in
 //! the same class as the digit budget rather than yielding bytes that no decoder
-//! would accept. Values this extreme cannot be parsed at all — `FromStr` caps
-//! exponents at `i64::MAX` — they only arise from stored bytes read back through
-//! `from_bytes`.
+//! would accept.
 
 use std::cmp::Ordering;
 use std::iter::Sum;
@@ -43,7 +41,8 @@ use crate::encoder::{encode_from_parts, MAX_EXPONENT};
 /// aligning operands with very different exponents.  This prevents
 /// pathological OOM from inputs like `1e+2_000_000_000 + 1e-2_000_000_000`.
 /// 100 000 digits is far beyond any practical need (DynamoDB uses at most 38).
-const MAX_DIGIT_COUNT: usize = 100_000;
+/// Integer conversions (`num_bigint`) share the same budget.
+pub(crate) const MAX_DIGIT_COUNT: usize = 100_000;
 
 /// A decimal decomposed for arithmetic: `sign × digits × 10^power`.
 ///
@@ -796,13 +795,24 @@ mod tests {
 
     // ── Exponent range ──────────────────────────────────────────────────
 
-    /// Build a value sitting at the largest encodable exponent. Such values
-    /// cannot be parsed (`FromStr` caps exponents at `i64::MAX`) but they
-    /// decode fine, which is how they reach arithmetic in practice: stored
-    /// bytes read back through `from_bytes`.
+    #[test]
+    fn result_past_i64_exponent_reparses() {
+        // Parsed operands can carry a result past i64::MAX; its string forms
+        // used to be rejected by FromStr, breaking serde round-trips.
+        let a = d("9e9223372036854775807");
+        let sum = &a + &a;
+        assert_eq!(sum.to_scientific_string(), "1.8e9223372036854775808");
+        assert_eq!(d(&sum.to_scientific_string()), sum);
+        assert_eq!(d(&sum.to_plain_string()), sum);
+    }
+
+    /// Build a value sitting at the largest encodable exponent, checking that
+    /// parsing and encoding agree on it.
     fn at_max_exponent(significand: &[u8], exponent_positive: bool) -> Decimal {
         let bytes = encode_from_parts(true, exponent_positive, MAX_EXPONENT, significand);
-        Decimal::from_bytes(&bytes).expect("largest encodable exponent must decode")
+        let decimal = Decimal::from_bytes(&bytes).expect("largest encodable exponent must decode");
+        assert_eq!(d(&decimal.to_scientific_string()), decimal);
+        decimal
     }
 
     #[test]

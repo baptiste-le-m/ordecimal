@@ -290,3 +290,44 @@ proptest! {
         let _ = Decimal::from_bytes(&data);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property 11: from_bytes accepts only canonical encodings
+// ---------------------------------------------------------------------------
+
+/// Eq/Ord/Hash compare raw bytes, so any byte string `from_bytes` accepts must
+/// be exactly what parsing its value produces — otherwise it would compare
+/// unequal to that value and could sort out of place.
+fn assert_canonical(data: &[u8]) -> Result<(), TestCaseError> {
+    if let Ok(decimal) = Decimal::from_bytes(data) {
+        let sci = decimal.to_scientific_string();
+        let reparsed: Decimal = sci
+            .parse()
+            .map_err(|e| TestCaseError::fail(format!("{sci:?} failed to reparse: {e}")))?;
+        prop_assert_eq!(reparsed.as_bytes(), data, "accepted non-canonical bytes");
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn from_bytes_accepts_only_canonical_arbitrary_bytes(data: Vec<u8>) {
+        assert_canonical(&data)?;
+    }
+
+    #[test]
+    fn from_bytes_accepts_only_canonical_mutations(
+        (_, decimal) in arb_valid_decimal(),
+        suffix in prop::collection::vec(any::<u8>(), 0..4),
+        padding_bits: u8,
+    ) {
+        // Valid encodings with junk appended or padding bits set: the shapes a
+        // second byte form of the same value would take.
+        let mut data = decimal.as_bytes().to_vec();
+        *data.last_mut().unwrap() |= padding_bits;
+        data.extend(suffix);
+        assert_canonical(&data)?;
+    }
+}

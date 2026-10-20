@@ -15,9 +15,11 @@ use thiserror::Error;
 /// Error returned when an [`ordecimal::Decimal`](Decimal) cannot be converted
 /// to a [`rust_decimal::Decimal`].
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RustDecimalConversionError {
-    /// The ordecimal value exceeds `rust_decimal`'s representable range
-    /// (96-bit coefficient, scale 0–28).
+    /// The ordecimal value is not exactly representable by `rust_decimal`:
+    /// outside its range, or needing more digits than its 96-bit coefficient
+    /// (scale 0–28) holds.
     #[error("value {0} is outside rust_decimal::Decimal representable range")]
     OutOfRange(String),
 }
@@ -38,7 +40,7 @@ impl From<rust_decimal::Decimal> for Decimal {
 /// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`rust_decimal::Decimal`].
 ///
 /// Fails if the ordecimal value exceeds `rust_decimal`'s 96-bit coefficient /
-/// 28-digit precision.
+/// 28-digit precision. Never rounds: a value that would lose digits is an error.
 impl TryFrom<Decimal> for rust_decimal::Decimal {
     type Error = RustDecimalConversionError;
 
@@ -54,8 +56,12 @@ impl TryFrom<&Decimal> for rust_decimal::Decimal {
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
         let s = value.to_scientific_string();
 
+        // from_scientific rounds digits past its precision instead of
+        // failing; converting back catches the loss.
         rust_decimal::Decimal::from_scientific(&s)
-            .map_err(|_| RustDecimalConversionError::OutOfRange(s))
+            .ok()
+            .filter(|rd| Decimal::from(*rd) == *value)
+            .ok_or(RustDecimalConversionError::OutOfRange(s))
     }
 }
 
@@ -232,6 +238,33 @@ mod tests {
             let rd = rust_decimal::Decimal::try_from(&od).unwrap();
             let expected: rust_decimal::Decimal = plain.parse().unwrap();
             assert_eq!(rd, expected, "conversion failed for {sci}");
+        }
+    }
+
+    #[test]
+    fn try_into_rust_decimal_rejects_precision_loss() {
+        // from_scientific rounds digits past rust_decimal's precision instead
+        // of failing, which used to return a silently rounded Ok.
+        let od: Decimal = "1.2345678901234567890123456789012345".parse().unwrap();
+        assert!(matches!(
+            rust_decimal::Decimal::try_from(&od),
+            Err(RustDecimalConversionError::OutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn try_into_rust_decimal_exact_at_its_limits() {
+        // The exactness check must not reject what rust_decimal holds exactly.
+        let cases = [
+            rust_decimal::Decimal::MAX,
+            rust_decimal::Decimal::MIN,
+            "0.0000000000000000000000000001".parse().unwrap(),
+            "-0.1234567890123456789012345678".parse().unwrap(),
+            "7.9228162514264337593543950335".parse().unwrap(),
+        ];
+        for rd in cases {
+            let od = Decimal::from(rd);
+            assert_eq!(rust_decimal::Decimal::try_from(&od), Ok(rd), "{rd}");
         }
     }
 

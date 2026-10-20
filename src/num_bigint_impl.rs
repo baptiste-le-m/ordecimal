@@ -7,15 +7,19 @@
 //!   since every integer is representable in ordecimal.
 //! - [`TryFrom<Decimal>`](TryFrom) for [`BigInt`] / [`BigUint`] — fallible,
 //!   because ordecimal values can have fractional parts (and `BigUint` rejects
-//!   negative values).
+//!   negative values), and because integers longer than 100 000 digits
+//!   (`1e100000`) are refused rather than materialized.
 
-use crate::decoder::decode_to_parts;
+use crate::arithmetic::MAX_DIGIT_COUNT;
+use crate::encoder::POSITIVE_ZERO_BYTE;
+use crate::integer_impl::{integer_string, IntegerStringError};
 use crate::Decimal;
 use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 /// Error returned when a [`Decimal`] cannot be converted to a [`BigInt`] or [`BigUint`].
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BigIntConversionError {
     /// The decimal value has a non-zero fractional part.
     #[error("value {0} is not an integer")]
@@ -24,6 +28,22 @@ pub enum BigIntConversionError {
     /// The decimal value is negative (only for [`BigUint`] conversions).
     #[error("value {0} is negative and cannot be represented as BigUint")]
     Negative(String),
+
+    /// The integer has more than 100 000 digits, the same budget as
+    /// arithmetic. Larger ones (`1e1000000000000`) would need gigabytes to
+    /// materialize.
+    #[error("value {0} has more than 100000 integer digits")]
+    TooLarge(String),
+}
+
+/// Write `value` as a plain integer string within the digit budget.
+fn integer_digits(value: &Decimal) -> Result<String, BigIntConversionError> {
+    integer_string(value, MAX_DIGIT_COUNT).map_err(|e| match e {
+        IntegerStringError::NotAnInteger => {
+            BigIntConversionError::NotAnInteger(value.to_plain_string())
+        }
+        IntegerStringError::TooLarge => BigIntConversionError::TooLarge(value.to_plain_string()),
+    })
 }
 
 // ── From<BigInt/BigUint> for Decimal ───────────────────────────────────
@@ -72,7 +92,8 @@ impl From<&BigUint> for Decimal {
 
 /// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`BigInt`].
 ///
-/// Fails if the decimal has a non-zero fractional part.
+/// Fails if the decimal has a non-zero fractional part, or if the integer
+/// has more than 100 000 digits ([`BigIntConversionError::TooLarge`]).
 impl TryFrom<Decimal> for BigInt {
     type Error = BigIntConversionError;
 
@@ -86,48 +107,7 @@ impl TryFrom<&Decimal> for BigInt {
     type Error = BigIntConversionError;
 
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
-        if value.is_zero() {
-            return Ok(BigInt::from(0));
-        }
-
-        let decoded = decode_to_parts(value.as_bytes())
-            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))?;
-
-        // Trim trailing zeros from the significand to get meaningful digits.
-        let sig = match decoded.significand.iter().rposition(|&d| d != 0) {
-            Some(pos) => &decoded.significand[..=pos],
-            None => &decoded.significand[..1], // at least one digit
-        };
-
-        // Determine whether the value is an integer.
-        // With a positive (or zero) exponent, the number of integer digits
-        // is `exponent + 1`.  If that covers all significand digits the
-        // value is an integer; the remaining positions are trailing zeros.
-        // With a negative exponent the value is < 1, always fractional.
-        if !decoded.exponent_positive && decoded.exponent > 0 {
-            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
-        }
-
-        let int_digits = decoded.exponent as usize + 1;
-        if int_digits < sig.len() {
-            // Some significand digits fall after the decimal point → fractional.
-            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
-        }
-
-        // Build the full digit string: significand digits + trailing zeros.
-        let trailing_zeros = int_digits - sig.len();
-        let mut digit_string = String::with_capacity(int_digits + 1);
-        if !decoded.positive {
-            digit_string.push('-');
-        }
-        for &d in sig {
-            digit_string.push((d + b'0') as char);
-        }
-        for _ in 0..trailing_zeros {
-            digit_string.push('0');
-        }
-
-        digit_string
+        integer_digits(value)?
             .parse::<BigInt>()
             .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))
     }
@@ -135,7 +115,8 @@ impl TryFrom<&Decimal> for BigInt {
 
 /// Fallible conversion from [`ordecimal::Decimal`](Decimal) to [`BigUint`].
 ///
-/// Fails if the decimal has a non-zero fractional part or is negative.
+/// Fails if the decimal is negative, has a non-zero fractional part, or has
+/// more than 100 000 integer digits ([`BigIntConversionError::TooLarge`]).
 impl TryFrom<Decimal> for BigUint {
     type Error = BigIntConversionError;
 
@@ -149,44 +130,12 @@ impl TryFrom<&Decimal> for BigUint {
     type Error = BigIntConversionError;
 
     fn try_from(value: &Decimal) -> Result<Self, Self::Error> {
-        if value.is_zero() {
-            return Ok(BigUint::from(0_u64));
-        }
-
-        let decoded = decode_to_parts(value.as_bytes())
-            .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))?;
-
-        if !decoded.positive {
+        // Byte order is numeric order, and zero is the single byte 0x80.
+        if value.as_bytes() < [POSITIVE_ZERO_BYTE].as_slice() {
             return Err(BigIntConversionError::Negative(value.to_plain_string()));
         }
 
-        // Trim trailing zeros from the significand to get meaningful digits.
-        let sig = match decoded.significand.iter().rposition(|&d| d != 0) {
-            Some(pos) => &decoded.significand[..=pos],
-            None => &decoded.significand[..1],
-        };
-
-        // With a negative exponent the value is < 1, always fractional.
-        if !decoded.exponent_positive && decoded.exponent > 0 {
-            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
-        }
-
-        let int_digits = decoded.exponent as usize + 1;
-        if int_digits < sig.len() {
-            return Err(BigIntConversionError::NotAnInteger(value.to_plain_string()));
-        }
-
-        // Build the full digit string: significand digits + trailing zeros.
-        let trailing_zeros = int_digits - sig.len();
-        let mut digit_string = String::with_capacity(int_digits);
-        for &d in sig {
-            digit_string.push((d + b'0') as char);
-        }
-        for _ in 0..trailing_zeros {
-            digit_string.push('0');
-        }
-
-        digit_string
+        integer_digits(value)?
             .parse::<BigUint>()
             .map_err(|_| BigIntConversionError::NotAnInteger(value.to_plain_string()))
     }
@@ -321,6 +270,43 @@ mod tests {
         let bi = BigInt::try_from(&od).unwrap();
         let expected = -BigInt::from(10_u64).pow(5000);
         assert_eq!(bi, expected);
+    }
+
+    #[test]
+    fn try_into_bigint_at_digit_budget() {
+        let od: Decimal = "1e99999".parse().unwrap();
+        let bi = BigInt::try_from(&od).unwrap();
+        assert_eq!(bi, BigInt::from(10_u64).pow(99_999));
+    }
+
+    #[test]
+    fn try_into_bigint_beyond_digit_budget_rejected() {
+        // 10^(10^12) would need ~415 GB; it used to be attempted, and
+        // 1e(i64::MAX) panicked with "capacity overflow".
+        for s in ["1e100000", "1e1000000000000", "-1e9223372036854775807"] {
+            let od: Decimal = s.parse().unwrap();
+            assert!(
+                matches!(
+                    BigInt::try_from(&od),
+                    Err(BigIntConversionError::TooLarge(_))
+                ),
+                "{s}"
+            );
+        }
+        let od: Decimal = "1e1000000000000".parse().unwrap();
+        assert!(matches!(
+            BigUint::try_from(&od),
+            Err(BigIntConversionError::TooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn try_into_biguint_negative_beyond_digit_budget_is_negative() {
+        let od: Decimal = "-1e1000000000000".parse().unwrap();
+        assert!(matches!(
+            BigUint::try_from(&od),
+            Err(BigIntConversionError::Negative(_))
+        ));
     }
 
     #[test]

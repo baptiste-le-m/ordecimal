@@ -66,8 +66,8 @@ mod serde_impl;
 pub(crate) mod significand;
 
 // Re-export main types and functions
-// bigdecimal_impl has no public items to re-export — it only provides
-// trait impls (From<BigDecimal> / From<Decimal>).
+#[cfg(feature = "bigdecimal")]
+pub use bigdecimal_impl::BigDecimalConversionError;
 pub use decimal::Decimal;
 #[cfg(feature = "decimal_rs")]
 pub use decimal_rs_impl::DecimalRsConversionError;

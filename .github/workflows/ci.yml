@@ -26,12 +26,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: dtolnay/rust-toolchain@1.73
-      - uses: Swatinem/rust-cache@v2
-      # Cargo 1.73 cannot read the v4 lockfile: re-resolve with stable cargo,
-      # preferring dependency versions that support the MSRV, and write it in
-      # the v3 format (identical for registry-only dependencies).
+      # Cargo 1.73 cannot read the committed v4 lockfile: re-resolve with
+      # stable cargo, preferring dependency versions that support the MSRV.
+      # Seeing rust-version = 1.73, it writes the v3 format 1.73 can read.
       - run: CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo +stable generate-lockfile
-      - run: sed -i 's/^version = 4$/version = 3/' Cargo.lock
+      # After re-resolving, so the cache key follows the MSRV lockfile.
+      - uses: Swatinem/rust-cache@v2
       # Library only: dev-dependencies (criterion, proptest) need newer Rust.
       - run: cargo +1.73 check --lib --locked
       - run: cargo +1.73 check --lib --all-features --locked

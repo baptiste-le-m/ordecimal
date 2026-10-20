@@ -81,8 +81,8 @@ struct Header {
 
 /// Read the sign and exponent, leaving `reader` at the start of the significand.
 ///
-/// Inlined so each of the two callers keeps the single-path code they had
-/// before sharing it (≈15% on `to_plain_string` otherwise).
+/// Always inlined: it sits on the hot path of `from_bytes`, `Display` and
+/// `to_plain_string`, which each had their own copy before it was shared.
 #[inline(always)]
 fn decode_header(reader: &mut BitReader) -> DecodeResult<Header> {
     if !reader.has_bits() {

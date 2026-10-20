@@ -22,8 +22,10 @@ use thiserror::Error;
 pub enum BigDecimalConversionError {
     /// The value has no `BigDecimal` form: an exponent below about −2^63
     /// needs a scale above `i64::MAX` (`1e-9223372036854775808`), and one
-    /// above about 2^63 needs its trailing zeros spelled out in the integer,
-    /// which is refused past 100 000 digits (the arithmetic budget).
+    /// above about 2^63 needs trailing zeros spelled out in the integer to
+    /// keep the scale at `i64::MIN`, which is refused when the padded integer
+    /// would exceed 100 000 digits (the arithmetic budget). Values that need
+    /// no padding convert at any length.
     #[error("value {0} is outside bigdecimal::BigDecimal representable range")]
     OutOfRange(String),
 }
@@ -88,10 +90,14 @@ impl TryFrom<&Decimal> for bigdecimal::BigDecimal {
                 // i64::MAX is not: the significand has no trailing zeros to drop.
                 let pad = (i128::from(i64::MIN) - scale).max(0);
                 let scale = i64::try_from(scale + pad).ok()?;
+                // The budget limits only the padding we would materialize; the
+                // significand's own digits always carry over.
                 let pad = usize::try_from(pad).ok().filter(|&p| {
-                    sig.len()
-                        .checked_add(p)
-                        .is_some_and(|n| n <= MAX_DIGIT_COUNT)
+                    p == 0
+                        || sig
+                            .len()
+                            .checked_add(p)
+                            .is_some_and(|n| n <= MAX_DIGIT_COUNT)
                 })?;
 
                 let mut digits = String::with_capacity(1 + sig.len() + pad);
@@ -211,6 +217,21 @@ mod tests {
             let back = bigdecimal::BigDecimal::try_from(&od)
                 .unwrap_or_else(|e| panic!("{bd:?} should convert back: {e}"));
             assert_eq!(back, bd);
+        }
+    }
+
+    #[test]
+    fn try_into_bigdecimal_long_values_without_padding() {
+        // The digit budget limits padding only: 100 001 significant digits
+        // must still carry over, at an ordinary scale and at i64::MIN.
+        let ones = "1".repeat(100_001);
+        for bd in [
+            bigdecimal::BigDecimal::new(BigInt::from_str(&ones).unwrap(), 0),
+            bigdecimal::BigDecimal::new(BigInt::from_str(&ones).unwrap(), 100_001),
+            bigdecimal::BigDecimal::new(BigInt::from_str(&ones).unwrap(), i64::MIN),
+        ] {
+            let od = Decimal::from(&bd);
+            assert_eq!(bigdecimal::BigDecimal::try_from(&od).unwrap(), bd);
         }
     }
 

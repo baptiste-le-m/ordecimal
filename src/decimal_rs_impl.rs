@@ -18,9 +18,10 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum DecimalRsConversionError {
     /// The ordecimal value is not exactly representable by `decimal_rs`:
-    /// more than 38 digits, or scale outside \[-126, 130\]. Near the top of
-    /// that range decimal_rs cannot parse its own output (`1e126`, scale
-    /// −126), so such values are reported here too.
+    /// more than 38 digits, or a scientific exponent outside \[-130, 125\],
+    /// the range decimal_rs's parser accepts. `decimal_rs::Decimal::from_parts`
+    /// reaches a little further (`1e126`), but decimal_rs cannot parse such
+    /// values back, so they are reported here too.
     #[error("value {0} is outside decimal_rs::Decimal representable range")]
     OutOfRange(String),
 }
@@ -197,6 +198,19 @@ mod tests {
             let dr: decimal_rs::Decimal = s.parse().unwrap();
             let od = Decimal::from(&dr);
             assert_eq!(decimal_rs::Decimal::try_from(&od), Ok(dr), "{s}");
+        }
+    }
+
+    #[test]
+    fn try_into_decimal_rs_exponent_bounds() {
+        for (s, ok) in [
+            ("1e125", true),
+            ("1e126", false),
+            ("1e-130", true),
+            ("1e-131", false),
+        ] {
+            let od: Decimal = s.parse().unwrap();
+            assert_eq!(decimal_rs::Decimal::try_from(&od).is_ok(), ok, "{s}");
         }
     }
 
